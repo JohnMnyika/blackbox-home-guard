@@ -8,8 +8,10 @@ Local video recording management and person detection for Linux. Uploaded footag
 - Local video upload (up to 2 GiB), FFprobe validation, metadata extraction, preview frames and SHA-256 fingerprinting.
 - Separate H.264/AAC playback copy for media that is not browser compatible. The uploaded original remains intact. Video streaming supports HTTP byte ranges.
 - OpenVINO `person-detection-0202` FP16 CPU inference, sampled analysis, confidence scores, annotated evidence, and timestamp navigation.
-- Dashboard metrics for recordings, people, events, recent analyses, service health, and local storage.
-- Recording library and details with search, status filters, sort controls, upload progress, playback, metadata, and SHA-256 fingerprints.
+- Dashboard metrics for recordings, people, events, recent analyses, service health, and local storage, with a real seven-day activity chart and image-backed event and recording previews.
+- Shared responsive navigation with a collapsible desktop sidebar and a dedicated system health view.
+- Image-led recording library and video analysis workstation with drag-and-drop upload, search, filters, sort controls, playback, detection timeline, metadata, and SHA-256 fingerprints.
+- Dedicated AI analytics view with real confidence distribution, analysis history, and evidence-linked detection results.
 - Detection timeline filters and timestamp navigation; evidence gallery groups detections by frame and provides a larger viewer.
 - Recording deletion with path validation and cascade cleanup of its analyses, detections, and stored evidence.
 - Persistent queued/running/completed/failed analysis records, progress polling, and duplicate-analysis protection.
@@ -78,7 +80,7 @@ Set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` if the API is served from a d
 |---|---|---|
 | GET | `/api/v1/health` | API/database health and local-processing mode |
 | GET | `/api/v1/system/info` | Runtime engines, model availability, and storage capacity |
-| GET | `/api/v1/dashboard` | Real recording, detection, evidence, and recent activity counters |
+| GET | `/api/v1/dashboard` | Real recording and detection counters, recent activity, and seven-day totals |
 | GET | `/api/v1/cameras` | List saved camera configurations (connectivity is not tested) |
 | POST | `/api/v1/cameras` | Save a validated RTSP or local device source |
 | POST | `/api/v1/recordings` | Upload a video as multipart field `file` |

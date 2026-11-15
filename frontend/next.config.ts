@@ -4,7 +4,7 @@ const nextConfig: NextConfig = {
   /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
-  experimental: { useTypeScriptCli: false },
+  experimental: { useTypeScriptCli: false, cpus: 2 },
   turbopack: {
     rules: {
       "*.css": {

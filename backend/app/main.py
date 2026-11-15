@@ -11,7 +11,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, Request
@@ -272,14 +272,20 @@ def health():
         active_analyses = 0
 
     model_available = (BASE_DIR / "models" / "person-detection-0202" / "FP16" / "person-detection-0202.xml").is_file()
+    try:
+        import openvino  # noqa: F401
+        ai_runtime_available = True
+    except (ImportError, OSError):
+        ai_runtime_available = False
     video_available = shutil.which("ffprobe") is not None and shutil.which("ffmpeg") is not None
-    operational = database_status == "connected" and model_available and video_available
+    ai_available = model_available and ai_runtime_available
+    operational = database_status == "connected" and ai_available and video_available
     return {
         "status": "healthy" if operational else "degraded",
         "application": "BlackBox Home Guard",
         "version": "0.2.0",
         "database": database_status,
-        "ai_engine": "available" if model_available else "not_configured",
+        "ai_engine": "available" if ai_available else "runtime_unavailable" if not ai_runtime_available else "not_configured",
         "video_engine": "available" if video_available else "offline",
         "video_processing": "processing" if active_analyses else "idle",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -295,9 +301,9 @@ def system_info():
     model_path = BASE_DIR / "models" / "person-detection-0202" / "FP16" / "person-detection-0202.xml"
     try:
         import openvino
-        ai_engine = "OpenVINO CPU" if model_path.is_file() else "Not configured"
+        ai_engine = "OpenVINO runtime available" if model_path.is_file() else "Model not configured"
         model_status = "person-detection-0202 FP16" if model_path.is_file() else "Model unavailable"
-    except ImportError:
+    except (ImportError, OSError):
         ai_engine = "Not configured"
         model_status = "OpenVINO unavailable"
     try:
@@ -325,19 +331,40 @@ def system_info():
     }
 
 
+def recording_thumbnail_url(recording_id: str) -> str | None:
+    """Return a frame endpoint without exposing its server-side path."""
+    try:
+        root = RECORDINGS_DIR.resolve(strict=True)
+        directory = (RECORDINGS_DIR / recording_id / "frames").resolve(strict=True)
+        if not directory.is_dir() or not directory.is_relative_to(root):
+            return None
+        frame = next(iter(sorted(directory.glob("frame_*.jpg"))), None)
+        if frame is None or not frame.is_file():
+            return None
+        return f"/api/v1/recordings/{recording_id}/frames/{frame.name}"
+    except (OSError, RuntimeError):
+        return None
+
+
 @app.get("/api/v1/dashboard")
 def dashboard_summary():
     """Return operational counters and recent real records."""
     with get_connection() as connection:
         recordings_count = connection.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
         processed_count = connection.execute("SELECT COUNT(*) FROM recordings WHERE status = 'processed'").fetchone()[0]
+        analyzed_count = connection.execute("SELECT COUNT(DISTINCT recording_id) FROM analysis_runs WHERE status = 'completed'").fetchone()[0]
         detection_count = connection.execute("SELECT COUNT(*) FROM detection_events").fetchone()[0]
         person_count = connection.execute("SELECT COUNT(*) FROM detection_events WHERE detection_type = 'person'").fetchone()[0]
         evidence_count = connection.execute("SELECT COUNT(DISTINCT evidence_image_path) FROM detection_events").fetchone()[0]
         camera_count = connection.execute("SELECT COUNT(*) FROM cameras").fetchone()[0]
         analysis_count = connection.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0]
         active_analysis_count = connection.execute("SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')").fetchone()[0]
-        recent_recordings = connection.execute("SELECT id, original_filename, file_size, status, created_at FROM recordings ORDER BY created_at DESC LIMIT 5").fetchall()
+        recent_recordings = connection.execute("""
+            SELECT id, original_filename, file_size, duration, frame_count, status, created_at,
+                   (SELECT COUNT(*) FROM detection_events d WHERE d.recording_id = recordings.id) AS detection_count,
+                   (SELECT status FROM analysis_runs a WHERE a.recording_id = recordings.id ORDER BY a.created_at DESC LIMIT 1) AS analysis_status
+            FROM recordings ORDER BY created_at DESC LIMIT 5
+        """).fetchall()
         recent_detections = connection.execute("""
             SELECT d.id, d.recording_id, d.analysis_id, d.detection_type, d.timestamp_seconds,
                    d.confidence, r.original_filename
@@ -350,13 +377,38 @@ def dashboard_summary():
             FROM analysis_runs a JOIN recordings r ON r.id = a.recording_id
             ORDER BY a.created_at DESC LIMIT 5
         """).fetchall()
+        detection_days = connection.execute("""
+            SELECT date(created_at) AS day, COUNT(*) AS count
+            FROM detection_events
+            WHERE date(created_at) >= date('now', '-6 days')
+            GROUP BY date(created_at)
+        """).fetchall()
+        recording_days = connection.execute("""
+            SELECT date(created_at) AS day, COUNT(*) AS count
+            FROM recordings
+            WHERE date(created_at) >= date('now', '-6 days')
+            GROUP BY date(created_at)
+        """).fetchall()
+    today = datetime.now(timezone.utc).date()
+    dates = [(today - timedelta(days=offset)).isoformat() for offset in range(6, -1, -1)]
+    detections_by_day = {row["day"]: row["count"] for row in detection_days}
+    recordings_by_day = {row["day"]: row["count"] for row in recording_days}
+    detection_items = [dict(row) for row in recent_detections]
+    for item in detection_items:
+        item["evidence_url"] = f"/api/v1/recordings/{item['recording_id']}/detections/{item['id']}/evidence"
+    recording_items = [dict(row) for row in recent_recordings]
+    for item in recording_items:
+        item["thumbnail_url"] = recording_thumbnail_url(item["id"])
     return {"recordings": recordings_count, "processed_recordings": processed_count,
+            "analyzed_recordings": analyzed_count,
             "detections": detection_count, "persons_detected": person_count,
             "analysis_runs": analysis_count, "active_analyses": active_analysis_count,
             "evidence_images": evidence_count,
-            "cameras": camera_count, "recent_recordings": [dict(row) for row in recent_recordings],
-            "recent_detections": [dict(row) for row in recent_detections],
-            "recent_analyses": [dict(row) for row in recent_analyses]}
+            "cameras": camera_count, "recent_recordings": recording_items,
+            "recent_detections": detection_items,
+            "recent_analyses": [dict(row) for row in recent_analyses],
+            "activity": [{"date": day, "detections": detections_by_day.get(day, 0),
+                          "recordings": recordings_by_day.get(day, 0)} for day in dates]}
 
 
 @app.get("/api/v1/cameras")
@@ -632,6 +684,7 @@ def list_recordings():
                 duration, width, height, frame_rate,
                 video_codec, frame_count, status, created_at,
                 playback_status, playback_codec, playback_format, playback_size,
+                (SELECT COUNT(*) FROM detection_events d WHERE d.recording_id = recordings.id) AS detection_count,
                 (SELECT status FROM analysis_runs a WHERE a.recording_id = recordings.id
                  ORDER BY a.created_at DESC LIMIT 1) AS analysis_status,
                 (SELECT completed_at FROM analysis_runs a WHERE a.recording_id = recordings.id
@@ -640,9 +693,12 @@ def list_recordings():
             ORDER BY created_at DESC
         """).fetchall()
 
+    recordings = [dict(row) for row in rows]
+    for recording in recordings:
+        recording["thumbnail_url"] = recording_thumbnail_url(recording["id"])
     return {
         "total": len(rows),
-        "recordings": [dict(row) for row in rows],
+        "recordings": recordings,
     }
 
 

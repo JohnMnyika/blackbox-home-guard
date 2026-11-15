@@ -1,24 +1,23 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
+import { AppShell } from "@/components/app-shell";
 import { useParams, useSearchParams } from "next/navigation";
 import {
-  ArrowLeft,
-  Calendar,
+  Activity,
   CheckCircle2,
   Copy,
   FileVideo,
   Fingerprint,
-  HardDrive,
   Image as ImageIcon,
   Loader2,
-  ShieldCheck,
   AlertCircle,
   BrainCircuit,
-  Play,
+  ArrowLeft,
 } from "lucide-react";
+import { PanelHeader, StatusPill } from "@/components/ui";
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -76,6 +75,7 @@ function RecordingDetailsContent() {
   const searchParams = useSearchParams();
   const requestedTimestamp = Number(searchParams.get("t"));
   const recordingId = params.id;
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const [recording, setRecording] = useState<Recording | null>(null);
   const [frames, setFrames] = useState<string[]>([]);
@@ -87,6 +87,8 @@ function RecordingDetailsContent() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisMessage, setAnalysisMessage] = useState("");
   const [analysis, setAnalysis] = useState<AnalysisRun | null>(null);
+  const [selectedDetection, setSelectedDetection] = useState<Detection | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
   const activeAnalysisId = analysis?.id;
   const activeAnalysisStatus = analysis?.status;
 
@@ -210,250 +212,47 @@ function RecordingDetailsContent() {
     }
   }
 
+  function seekTo(timestamp: number) {
+    const player = videoRef.current;
+    if (!player) return;
+    player.currentTime = timestamp;
+    setCurrentTime(timestamp);
+    void player.play();
+  }
+
   return (
-    <main className="min-h-screen bg-[#090e15] text-slate-200">
-      <header className="flex min-h-20 items-center justify-between border-b border-white/[0.07] bg-[#0c131d] px-5 py-4 md:px-8">
-        <div>
-          <Link
-            href="/recordings"
-            className="mb-1 flex items-center gap-2 text-xs text-slate-500 hover:text-cyan-400"
-          >
-            <ArrowLeft size={14} /> Back to recordings
-          </Link>
-          <h1 className="text-lg font-semibold text-white">
-            Recording inspection
-          </h1>
-        </div>
+    <main className="min-h-[calc(100vh-72px)] bg-[#080d17] text-slate-200">
+      <div className="mx-auto max-w-[1680px] space-y-5 p-4 sm:p-6 xl:p-7">
+        {loading ? <div className="surface-panel rounded-xl"><div className="grid min-h-[60vh] place-items-center text-xs text-slate-500"><span className="flex items-center gap-2"><Loader2 size={17} className="animate-spin text-cyan-300"/>Loading recording workspace</span></div></div>
+        : error && !recording ? <div role="alert" className="rounded-xl border border-red-400/20 bg-red-400/[0.05] p-5 text-sm text-red-200"><AlertCircle className="mb-2"/>{error}<Link href="/recordings" className="ml-3 text-cyan-200 underline">Return to library</Link></div>
+        : recording ? <>
+          <section className="flex flex-wrap items-end justify-between gap-4"><div className="min-w-0"><Link href="/recordings" className="mb-2 inline-flex items-center gap-1.5 text-[10px] text-slate-500 hover:text-cyan-200"><ArrowLeft size={12}/>Recordings library</Link><p className="text-[9px] font-semibold uppercase tracking-[.2em] text-blue-300">Video analysis workstation</p><h1 className="mt-1.5 max-w-4xl truncate text-xl font-semibold text-white sm:text-2xl" title={recording.original_filename}>{recording.original_filename}</h1><p className="mt-1.5 text-[10px] text-slate-500">Imported {new Date(recording.created_at).toLocaleString("en-US",{dateStyle:"medium",timeStyle:"short",timeZone:"UTC"})} UTC</p></div><StatusPill label={analysis?.status??"Not analyzed"} tone={analysis?.status==="completed"?"emerald":analysis?.status==="failed"?"red":analyzing?"cyan":"slate"}/></section>
 
-        <div className="flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 text-xs text-emerald-400">
-          <ShieldCheck size={15} />
-          Local evidence
-        </div>
-      </header>
+          <section className="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_350px]">
+            <div className="space-y-4">
+              <article className="surface-panel overflow-hidden rounded-xl">
+                <div className="relative bg-black"><video ref={videoRef} key={recording.id} controls playsInline preload="metadata" className="aspect-video max-h-[72vh] w-full bg-black" src={`${API_URL}/api/v1/recordings/${recording.id}/video`} onTimeUpdate={(event)=>setCurrentTime(event.currentTarget.currentTime)} onLoadedMetadata={(event)=>{if(Number.isFinite(requestedTimestamp)&&requestedTimestamp>0){event.currentTarget.currentTime=requestedTimestamp;setCurrentTime(requestedTimestamp);}}}>Your browser cannot play this video format.</video><span className="absolute left-3 top-3 rounded-md border border-white/10 bg-black/65 px-2 py-1 text-[9px] text-slate-200">LOCAL RECORDING</span><span className="absolute bottom-12 right-3 rounded bg-black/75 px-2 py-1 text-[9px] tabular-nums text-white">{formatDuration(currentTime)} / {formatDuration(recording.duration)}</span></div>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#25334a] bg-[#111c2e] px-4 py-3 text-[9px] text-slate-400"><span>{recording.playback_status==="converted"?"Compatible H.264 playback copy":"Original uploaded footage"}</span><span>HTTP range playback · source remains unchanged</span></div>
+              </article>
+              <article className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Detection timeline" subtitle="Select a marker to jump to the matching timestamp" icon={Activity}/><div className="px-4 py-5 sm:px-5">{detections.length&&recording.duration? <><div className="relative h-10 rounded-lg border border-[#25334a] bg-[#0b1422]"><div className="absolute left-2 right-2 top-1/2 h-px bg-[#344660]"/>{detections.map((detection)=>{const left=Math.max(0,Math.min(100,detection.timestamp_seconds/(recording.duration??1)*100));return <button key={detection.id} onClick={()=>{setSelectedDetection(detection);seekTo(detection.timestamp_seconds);}} title={`${formatDuration(detection.timestamp_seconds)} · ${(detection.confidence*100).toFixed(1)}% confidence`} aria-label={`Seek to detection at ${formatDuration(detection.timestamp_seconds)}`} className={`absolute top-1/2 h-4 w-2 -translate-y-1/2 rounded-sm border border-[#0b1422] ${selectedDetection?.id===detection.id?"bg-cyan-200 ring-2 ring-cyan-300/30":"bg-blue-400 hover:bg-cyan-300"}`} style={{left:`calc(${left}% - 4px)`}}/>;})}</div><div className="mt-2 flex justify-between text-[9px] tabular-nums text-slate-600"><span>00:00</span><span>{formatDuration(recording.duration)}</span></div></>:<p className="text-[10px] text-slate-500">Run person analysis to add timestamp markers to this recording.</p>}
+                {selectedDetection&&<div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-cyan-400/20 bg-cyan-400/[0.04] p-3"><Image unoptimized width={112} height={72} src={`${API_URL}${selectedDetection.evidence_url}`} alt="Selected detection evidence" className="h-14 w-24 rounded-md object-cover"/><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold text-white">Person · {(selectedDetection.confidence*100).toFixed(1)}% confidence</p><p className="mt-1 text-[9px] text-slate-400">{formatDuration(selectedDetection.timestamp_seconds)} · box {selectedDetection.bbox_x},{selectedDetection.bbox_y} {selectedDetection.bbox_width}×{selectedDetection.bbox_height}px</p></div><button onClick={()=>seekTo(selectedDetection.timestamp_seconds)} className="rounded-md border border-cyan-400/20 px-3 py-2 text-[9px] text-cyan-200 hover:bg-cyan-400/10">Jump to frame</button></div>}</div></article>
+              <article className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Detection evidence" subtitle={`${detections.length} persisted person events`} icon={Fingerprint}/>{detections.length?<div className="grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3">{detections.map((detection)=><button key={detection.id} onClick={()=>{setSelectedDetection(detection);seekTo(detection.timestamp_seconds);}} className={`overflow-hidden rounded-lg border text-left transition ${selectedDetection?.id===detection.id?"border-cyan-300/50 bg-cyan-400/[0.04]":"border-[#25334a] bg-[#0d1524] hover:border-blue-400/30"}`}><Image unoptimized width={480} height={270} src={`${API_URL}${detection.evidence_url}`} alt={`Person detection at ${formatDuration(detection.timestamp_seconds)}`} className="aspect-video w-full object-cover"/><div className="flex items-center justify-between gap-2 p-3"><span><span className="block text-[10px] font-medium text-slate-100">{formatDuration(detection.timestamp_seconds)}</span><span className="mt-1 block text-[9px] text-slate-500">Person · {detection.bbox_width}×{detection.bbox_height}px</span></span><StatusPill label={`${(detection.confidence*100).toFixed(1)}%`} tone={detection.confidence>=.85?"emerald":"blue"}/></div></button>)}</div>:<div className="p-4 text-[10px] text-slate-500">No detections are stored for this recording yet.</div>}</article>
+              <article className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Extracted preview frames" subtitle={`${frames.length} locally stored preview images`} icon={ImageIcon}/>{frames.length?<div className="grid gap-2 p-3 sm:grid-cols-2 lg:grid-cols-3">{frames.map((frame,index)=><a key={frame} href={`${API_URL}${frame}`} target="_blank" rel="noreferrer" className="overflow-hidden rounded-lg border border-[#25334a] bg-[#0d1524]"><Image unoptimized width={640} height={360} src={`${API_URL}${frame}`} alt={`Extracted frame ${index+1}`} className="aspect-video w-full object-cover"/><p className="px-3 py-2 text-[9px] text-slate-500">Preview {index+1}</p></a>)}</div>:<div className="p-4 text-[10px] text-slate-500">No extracted preview frames are available.</div>}</article>
+            </div>
 
-      <div className="mx-auto max-w-6xl space-y-6 p-5 md:p-8">
-        {loading ? (
-          <div className="flex justify-center py-24">
-            <Loader2 className="animate-spin text-cyan-400" size={28} />
-          </div>
-        ) : error && !recording ? (
-          <div className="rounded-xl border border-red-400/20 bg-red-400/[0.06] p-5 text-sm text-red-300">
-            <AlertCircle className="mb-2" />
-            {error}
-          </div>
-        ) : recording ? (
-          <>
-            <section>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-400">
-                Evidence inspection
-              </p>
-              <h2 className="mt-2 break-all text-2xl font-semibold text-white">
-                {recording.original_filename}
-              </h2>
-              <p className="mt-2 text-xs text-slate-500">
-                Imported {new Date(recording.created_at).toLocaleString()}
-              </p>
-            </section>
-
-            <section className="overflow-hidden rounded-xl border border-white/[0.08] bg-black">
-              <video
-                key={recording.id}
-                controls
-                playsInline
-                preload="metadata"
-                className="aspect-video max-h-[70vh] w-full bg-black"
-                src={`${API_URL}/api/v1/recordings/${recording.id}/video`}
-                onLoadedMetadata={(event) => {
-                  if (Number.isFinite(requestedTimestamp) && requestedTimestamp > 0) event.currentTarget.currentTime = requestedTimestamp;
-                }}
-              >
-                Your browser cannot play this video format.
-              </video>
-              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.07] bg-[#111923] px-4 py-3 text-[11px] text-slate-400">
-                <span>
-                  {recording.playback_status === "converted"
-                    ? "Compatible H.264 playback copy"
-                    : "Original uploaded footage"}
-                </span>
-                <span>
-                  Original evidence remains unchanged.
-                </span>
-              </div>
-            </section>
-
-            <section className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div><h3 className="flex items-center gap-2 text-sm font-semibold text-white"><BrainCircuit size={17} className="text-cyan-400" />Local person analysis</h3><p className="mt-1 text-xs text-slate-500">OpenVINO CPU · Results are detections, not security incident claims.</p></div>
-                <div className="flex items-center gap-2"><label htmlFor="sample-interval" className="text-xs text-slate-400">Sample every</label><select id="sample-interval" value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} disabled={analyzing} className="rounded border border-white/10 bg-[#0b1119] px-2 py-2 text-xs text-white"><option value={1}>1 second</option><option value={2}>2 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select><button onClick={runAnalysis} disabled={analyzing} className="flex items-center gap-2 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-50">{analyzing ? <Loader2 size={14} className="animate-spin" /> : <BrainCircuit size={14} />}{analyzing ? "Analyzing" : "Analyze video"}</button></div>
-              </div>
-              {analysisMessage && <p role="status" className="mt-4 text-xs text-emerald-300">{analysisMessage}</p>}
-              {analysis && <div className="mt-4 rounded-lg border border-white/[0.06] bg-black/10 p-4"><div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium uppercase tracking-wide text-slate-300">{analysis.status}</span><span className="text-slate-400">{analysis.analyzed_frames === null ? "frame count unavailable" : `${analysis.analyzed_frames} sampled frames`} · {analysis.total_detections} detections{analysis.processing_seconds !== null ? ` · ${analysis.processing_seconds}s` : ""}</span></div>{analysis.status === "queued" || analysis.status === "running" ? <div className="mt-3"><div className="mb-1 flex justify-between text-[10px] text-slate-500"><span>Local processing progress</span><span>{analysis.progress_percent}%</span></div><div role="progressbar" aria-label="Analysis progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={analysis.progress_percent} className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-cyan-400 transition-[width]" style={{width:`${analysis.progress_percent}%`}}/></div></div> : null}{analysis.status === "failed" && analysis.error_message && <p className="mt-2 text-xs text-red-300">{analysis.error_message}</p>}</div>}
-              <div className="mt-4 space-y-2">
-                {detections.length ? detections.map((detection) => <div key={detection.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/[0.06] p-3"><div className="flex items-center gap-3"><Image unoptimized width={96} height={56} src={`${API_URL}${detection.evidence_url}`} alt="Person detection evidence" className="h-14 w-24 rounded object-cover" /><div><p className="text-xs font-medium text-white">Person · {(detection.confidence * 100).toFixed(1)}% confidence</p><p className="mt-1 text-[11px] text-slate-500">{formatDuration(detection.timestamp_seconds)} · box {detection.bbox_x},{detection.bbox_y} {detection.bbox_width}×{detection.bbox_height}px</p><p className="mt-1 text-[10px] text-slate-600">Analysis {detection.analysis_id}</p></div></div><button onClick={() => { const player = document.querySelector("video"); if (player) { player.currentTime = detection.timestamp_seconds; player.play(); } }} className="flex items-center gap-1 text-xs text-cyan-300"><Play size={13} />Jump to video</button></div>) : <p className="py-3 text-xs text-slate-500">No detections are stored for this recording yet.</p>}
-              </div>
-            </section>
-
-            {error && (
-              <div className="rounded-lg border border-red-400/20 bg-red-400/[0.06] p-3 text-xs text-red-300">
-                {error}
-              </div>
-            )}
-
-            <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              {[
-                {
-                  label: "File size",
-                  value: formatBytes(recording.file_size),
-                  icon: HardDrive,
-                },
-                {
-                  label: "Duration",
-                  value: formatDuration(recording.duration),
-                  icon: Calendar,
-                },
-                {
-                  label: "Resolution",
-                  value: `${recording.width ?? "?"} × ${recording.height ?? "?"}`,
-                  icon: FileVideo,
-                },
-                {
-                  label: "Extracted frames",
-                  value: String(recording.frame_count),
-                  icon: ImageIcon,
-                },
-              ].map((item) => {
-                const Icon = item.icon;
-                return (
-                  <div
-                    key={item.label}
-                    className="rounded-xl border border-white/[0.07] bg-[#111923] p-4"
-                  >
-                    <Icon size={18} className="text-cyan-400" />
-                    <p className="mt-3 text-lg font-semibold text-white">
-                      {item.value}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {item.label}
-                    </p>
-                  </div>
-                );
-              })}
-            </section>
-
-            <section className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
-                <Fingerprint size={17} className="text-cyan-400" />
-                Evidence integrity
-              </h3>
-
-              <p className="mt-4 text-[10px] uppercase tracking-wider text-slate-500">
-                SHA-256 fingerprint
-              </p>
-              <code className="mt-2 block break-all text-xs leading-relaxed text-cyan-300">
-                {recording.sha256}
-              </code>
-
-              <button
-                onClick={copyHash}
-                className="mt-4 flex items-center gap-2 rounded-lg border border-white/[0.10] px-3 py-2 text-xs text-slate-300 hover:bg-white/[0.05]"
-              >
-                {copied ? <CheckCircle2 size={14} /> : <Copy size={14} />}
-                {copied ? "Copied" : "Copy fingerprint"}
-              </button>
-            </section>
-
-            <section className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
-              <h3 className="text-sm font-semibold text-white">
-                Video metadata
-              </h3>
-
-              <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {[
-                  ["Status", recording.status],
-                  ["Video codec", recording.video_codec ?? "Unknown"],
-                  ["Original format", recording.format_name ?? "Unknown"],
-                  [
-                    "Playback status",
-                    recording.playback_status === "converted"
-                      ? "Compatible copy generated"
-                      : recording.playback_status === "failed"
-                        ? "Conversion failed; original retained"
-                        : "Original is browser-compatible",
-                  ],
-                  [
-                    "Playback codec",
-                    recording.playback_codec ?? recording.video_codec ?? "Unknown",
-                  ],
-                  [
-                    "Playback format",
-                    recording.playback_format ?? recording.format_name ?? "Original",
-                  ],
-                  [
-                    "Frame rate",
-                    recording.frame_rate
-                      ? `${recording.frame_rate} FPS`
-                      : "Unknown",
-                  ],
-                  ["Recording ID", recording.id],
-                  ["Original filename", recording.original_filename],
-                ].map(([label, value]) => (
-                  <div key={label} className="min-w-0">
-                    <p className="text-[10px] uppercase tracking-wider text-slate-500">
-                      {label}
-                    </p>
-                    <p className="mt-1 break-all text-xs text-slate-200">
-                      {value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-white">
-                <ImageIcon size={17} className="text-cyan-400" />
-                Extracted frames ({frames.length})
-              </h3>
-
-              {frames.length ? (
-                <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {frames.map((frame, index) => (
-                    <a
-                      key={frame}
-                      href={`${API_URL}${frame}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="overflow-hidden rounded-lg border border-white/[0.08] bg-black/20"
-                    >
-                      <Image
-                        unoptimized
-                        width={640}
-                        height={360}
-                        src={`${API_URL}${frame}`}
-                        alt={`Extracted frame ${index + 1}`}
-                        className="aspect-video w-full object-contain"
-                      />
-                      <p className="p-3 text-[10px] text-slate-400">
-                        Frame {index + 1} · {frame.split("/").pop()}
-                      </p>
-                    </a>
-                  ))}
-                </div>
-              ) : (
-                <p className="mt-4 text-xs text-slate-500">
-                  No extracted frames are available.
-                </p>
-              )}
-            </section>
-          </>
-        ) : null}
-
-        <footer className="border-t border-white/[0.06] pt-5 text-[10px] text-slate-600">
-          BlackBox Home Guard · Local video evidence inspection
-        </footer>
+            <aside className="space-y-4 xl:sticky xl:top-[88px]">
+              <article className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Analysis controls" subtitle="Sampled local person inference" icon={BrainCircuit}/><div className="space-y-4 p-4"><p className="text-[10px] leading-relaxed text-slate-500">Runs the OpenVINO person model on sampled frames. This is offline footage analysis, not a live camera feed.</p><div className="grid grid-cols-[1fr_auto] items-center gap-2"><label htmlFor="sample-interval" className="text-[10px] text-slate-400">Sample every</label><select id="sample-interval" value={intervalSeconds} onChange={(event)=>setIntervalSeconds(Number(event.target.value))} disabled={analyzing} className="rounded-md border border-[#25334a] bg-[#080d17] px-2.5 py-2 text-[10px] text-white"><option value={1}>1 second</option><option value={2}>2 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select></div><button onClick={runAnalysis} disabled={analyzing} className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-500 px-4 py-2.5 text-[10px] font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-50">{analyzing?<Loader2 size={14} className="animate-spin"/>:<BrainCircuit size={14}/>} {analyzing?"Analysis running":"Start analysis"}</button>{analysisMessage&&<p role="status" className="text-[9px] text-emerald-300">{analysisMessage}</p>}{analysis&&<div className="rounded-lg border border-[#25334a] bg-[#0d1524] p-3"><div className="flex items-center justify-between gap-2"><StatusPill label={analysis.status} tone={analysis.status==="completed"?"emerald":analysis.status==="failed"?"red":"cyan"}/><span className="text-[9px] text-slate-500">{analysis.progress_percent}%</span></div><div className="mt-3 h-1.5 overflow-hidden rounded bg-[#25334a]"><div className="h-full rounded bg-cyan-300 transition-[width]" style={{width:`${analysis.progress_percent}%`}}/></div><p className="mt-2 text-[9px] text-slate-500">{analysis.analyzed_frames??"—"} frames sampled · {analysis.total_detections} detections{analysis.processing_seconds!==null?` · ${analysis.processing_seconds}s`:""}</p>{analysis.error_message&&<p role="alert" className="mt-2 text-[9px] text-red-300">{analysis.error_message}</p>}</div>}</div></article>
+              <article className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Recording metadata" icon={FileVideo}/><div className="divide-y divide-[#25334a]/70 px-4">{[["Duration",formatDuration(recording.duration)],["File size",formatBytes(recording.file_size)],["Resolution",`${recording.width??"?"} × ${recording.height??"?"}`],["Frame rate",recording.frame_rate?`${recording.frame_rate} FPS`:"Unknown"],["Codec",recording.video_codec??"Unknown"],["Preview frames",String(recording.frame_count)],["AI detections",String(detections.length)]].map(([label,value])=><div key={label} className="flex items-center justify-between gap-3 py-2.5"><span className="text-[9px] text-slate-500">{label}</span><span className="text-right text-[10px] text-slate-200">{value}</span></div>)}</div></article>
+              <article className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Integrity fingerprint" icon={Fingerprint}/><div className="p-4"><p className="break-all rounded-md border border-[#25334a] bg-[#080d17] p-3 font-mono text-[9px] leading-relaxed text-cyan-100">{recording.sha256}</p><button onClick={copyHash} className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#344660] px-3 py-2 text-[9px] text-slate-300 hover:text-white">{copied?<CheckCircle2 size={12}/>:<Copy size={12}/>} {copied?"Copied":"Copy SHA-256"}</button><p className="mt-2 text-[9px] leading-relaxed text-slate-600">A file fingerprint detects later changes; it does not establish source authenticity.</p></div></article>
+              {error&&<div role="alert" className="rounded-lg border border-red-400/20 bg-red-400/[0.05] p-3 text-[10px] text-red-200"><AlertCircle size={13} className="mb-1"/>{error}</div>}
+            </aside>
+          </section>
+        </> : null}
+        <footer className="border-t border-[#25334a] pt-4 text-[9px] text-slate-600">BLACKBOX HOME GUARD · LOCAL VIDEO ANALYSIS WORKSTATION</footer>
       </div>
     </main>
   );
+
 }
 
 
@@ -468,7 +267,7 @@ export default function RecordingDetailsPage() {
         </main>
       }
     >
-      <RecordingDetailsContent />
+      <AppShell title="Recording detail"><RecordingDetailsContent /></AppShell>
     </Suspense>
   );
 }

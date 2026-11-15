@@ -1,579 +1,69 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
+import Link from "next/link";
 import {
-  ArrowLeft,
-  CheckCircle2,
-  Upload,
-  FileVideo,
-  HardDrive,
-  Fingerprint,
-  Image as ImageIcon,
-  Loader2,
-  RefreshCw,
-  Copy,
-  ShieldCheck,
-  AlertCircle,
-  Search,
-  Trash2,
+  Activity, AlertCircle, BrainCircuit, CheckCircle2, Clock3, Copy, FileVideo2, Fingerprint,
+  HardDrive, Image as ImageIcon, Loader2, Play, RefreshCw, Search,
+  Trash2, Upload, Video,
 } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
+import { EmptyState, LoadingState, MetricCard, PanelHeader, StatusPill } from "@/components/ui";
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+const API=process.env.NEXT_PUBLIC_API_URL??"http://127.0.0.1:8000";
+type Recording={id:string;original_filename:string;file_size:number;sha256:string;duration:number|null;width:number|null;height:number|null;frame_rate:number|null;video_codec:string|null;frame_count:number;status:string;created_at:string;playback_status?:string;analysis_status:string|null;last_analyzed_at:string|null;detection_count:number;thumbnail_url:string|null};
+type Frames={recording_id:string;total:number;frames:string[]};
+type UploadResult={filename:string;frame_count:number};
+const ALLOWED=[".mp4",".mov",".mkv",".avi",".webm",".m4v",".mpeg",".mpg"];
+function bytes(n:number){const units=["B","KB","MB","GB","TB"];let value=n,index=0;while(value>=1024&&index<units.length-1){value/=1024;index++;}return `${value.toFixed(index>1?1:0)} ${units[index]}`;}
+function duration(n:number|null){if(n===null||!Number.isFinite(n))return "Unknown";const s=Math.floor(n),m=Math.floor(s/60);return `${m}:${(s%60).toString().padStart(2,"0")}`;}
+function analysisTone(status:string|null){return status==="completed"?"emerald":status==="running"||status==="queued"?"cyan":status==="failed"?"red":"slate" as const;}
 
-type Recording = {
-  id: string;
-  original_filename: string;
-  file_size: number;
-  sha256: string;
-  duration: number;
-  width: number;
-  height: number;
-  frame_rate: number | null;
-  video_codec: string;
-  frame_count: number;
-  status: string;
-  playback_status?: "original" | "converted" | "failed";
-  playback_codec?: string | null;
-  playback_format?: string | null;
-  playback_size?: number | null;
-  analysis_status?: string | null;
-  last_analyzed_at?: string | null;
-  created_at: string;
-};
+export default function RecordingsPage(){
+  const [recordings,setRecordings]=useState<Recording[]>([]);const [loading,setLoading]=useState(true);const [uploading,setUploading]=useState(false);const [progress,setProgress]=useState(0);const [file,setFile]=useState<File|null>(null);const [dragging,setDragging]=useState(false);const [error,setError]=useState("");const [notice,setNotice]=useState("");const [search,setSearch]=useState("");const [status,setStatus]=useState("all");const [analysis,setAnalysis]=useState("all");const [sort,setSort]=useState("newest");const [frames,setFrames]=useState<Record<string,string[]>>({});const [expanded,setExpanded]=useState<string|null>(null);const [frameBusy,setFrameBusy]=useState("");const [deleteBusy,setDeleteBusy]=useState("");
 
-type FrameResponse = {
-  recording_id: string;
-  total: number;
-  frames: string[];
-};
-type UploadResult = { filename: string; frame_count: number };
+  const load=useCallback(async()=>{try{const response=await fetch(`${API}/api/v1/recordings`,{cache:"no-store"});const data=await response.json();if(!response.ok)throw new Error(data.detail||"Could not load the recording library.");setRecordings(data.recordings??[]);setError("");}catch(cause){setError(cause instanceof Error?cause.message:"Backend connection failed.");}finally{setLoading(false);}},[]);
+  useEffect(()=>{const timer=window.setTimeout(()=>void load(),0);return()=>window.clearTimeout(timer);},[load]);
 
-function formatBytes(bytes: number) {
-  if (!bytes) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const index = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, index)).toFixed(2)} ${units[index]}`;
-}
+  function chooseFile(next:File|null){setFile(next);setError("");setNotice("");}
+  async function submitUpload(event:React.FormEvent<HTMLFormElement>){event.preventDefault();if(!file){setError("Choose a video file to import.");return;}const extension=file.name.slice(file.name.lastIndexOf(".")).toLowerCase();if(!ALLOWED.includes(extension)){setError("Choose MP4, MOV, MKV, AVI, WEBM, M4V, MPEG or MPG footage.");return;}if(file.size>2*1024*1024*1024){setError("This video exceeds the 2 GiB upload limit.");return;}
+    setUploading(true);setProgress(0);setError("");setNotice("");const body=new FormData();body.append("file",file);
+    try{const result=await new Promise<UploadResult>((resolve,reject)=>{const request=new XMLHttpRequest();request.open("POST",`${API}/api/v1/recordings`);request.upload.onprogress=(event)=>{if(event.lengthComputable)setProgress(Math.round(event.loaded/event.total*100));};request.onerror=()=>reject(new Error("Network error while uploading the video."));request.onload=()=>{let payload:UploadResult&{detail?:string};try{payload=JSON.parse(request.responseText) as UploadResult&{detail?:string};}catch{reject(new Error("The backend returned an unreadable upload response."));return;}if(request.status<200||request.status>=300)reject(new Error(payload.detail||"Video upload failed."));else resolve(payload);};request.send(body);});setNotice(`Imported ${result.filename}; ${result.frame_count} preview frames extracted.`);setFile(null);const input=document.getElementById("recording-upload") as HTMLInputElement|null;if(input)input.value="";await load();}catch(cause){setError(cause instanceof Error?cause.message:"Upload failed.");}finally{setUploading(false);setProgress(0);}}
 
-function formatDuration(seconds: number) {
-  if (!Number.isFinite(seconds)) return "Unknown";
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remaining = Math.floor(seconds % 60);
+  async function toggleFrames(item:Recording){if(expanded===item.id){setExpanded(null);return;}setExpanded(item.id);if(frames[item.id])return;setFrameBusy(item.id);try{const response=await fetch(`${API}/api/v1/recordings/${item.id}/frames`,{cache:"no-store"});const data:Frames=await response.json();if(!response.ok)throw new Error("Unable to retrieve preview frames.");setFrames((previous)=>({...previous,[item.id]:data.frames??[]}));}catch(cause){setError(cause instanceof Error?cause.message:"Unable to load extracted frames.");}finally{setFrameBusy("");}}
+  async function deleteItem(item:Recording){if(!window.confirm(`Delete “${item.original_filename}” and its analysis history and evidence? This cannot be undone.`))return;setDeleteBusy(item.id);setError("");try{const response=await fetch(`${API}/api/v1/recordings/${item.id}`,{method:"DELETE"});const data=await response.json();if(!response.ok)throw new Error(data.detail||"Recording deletion failed.");setRecordings((items)=>items.filter((recording)=>recording.id!==item.id));setNotice(data.cleanup_pending?"Recording removed; storage cleanup is pending.":"Recording and associated evidence removed.");}catch(cause){setError(cause instanceof Error?cause.message:"Recording deletion failed.");}finally{setDeleteBusy("");}}
+  async function copyHash(hash:string){try{await navigator.clipboard.writeText(hash);setNotice("SHA-256 fingerprint copied.");}catch{setError("Could not copy the fingerprint.");}}
 
-  return hours > 0
-    ? `${hours}h ${minutes}m ${remaining}s`
-    : `${minutes}m ${remaining}s`;
-}
+  const visible=useMemo(()=>recordings.filter((item)=>item.original_filename.toLowerCase().includes(search.trim().toLowerCase())).filter((item)=>status==="all"||item.status===status).filter((item)=>analysis==="all"||(analysis==="not_analyzed"?!item.analysis_status:analysis==="active"?["queued","running"].includes(item.analysis_status??""):item.analysis_status===analysis)).sort((a,b)=>sort==="largest"?b.file_size-a.file_size:new Date(b.created_at).getTime()-new Date(a.created_at).getTime()),[recordings,search,status,analysis,sort]);
+  const totalSize=recordings.reduce((sum,item)=>sum+item.file_size,0);const analyzed=recordings.filter((item)=>item.analysis_status==="completed").length;const events=recordings.reduce((sum,item)=>sum+item.detection_count,0);
 
-export default function RecordingsPage() {
-  const [recordings, setRecordings] = useState<Recording[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [frames, setFrames] = useState<Record<string, string[]>>({});
-  const [frameLoading, setFrameLoading] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [analysisFilter, setAnalysisFilter] = useState("all");
-  const [sortBy, setSortBy] = useState("newest");
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  return <AppShell title="Recordings"><div className="mx-auto max-w-[1600px] space-y-5 p-4 sm:p-6 xl:p-7">
+    <section className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-[9px] font-semibold uppercase tracking-[.22em] text-blue-300">Video evidence library</p><h1 className="mt-2 text-2xl font-semibold tracking-tight text-white sm:text-[30px]">Recordings</h1><p className="mt-1.5 text-xs text-slate-400">Search, inspect, analyze and manage locally stored video evidence.</p></div><a href="#upload-panel" className="inline-flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2.5 text-xs font-semibold text-white shadow-lg shadow-blue-950/30 transition hover:bg-blue-400"><Upload size={15}/>Upload video</a></section>
 
-  const loadRecordings = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(`${API_URL}/api/v1/recordings`, {
-        cache: "no-store",
-      });
+    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard title="Recordings" value={loading?"—":recordings.length} detail="In the local evidence library" icon={Video} tone="blue"/><MetricCard title="Video storage" value={bytes(totalSize)} detail="Original footage size" icon={HardDrive} tone="cyan"/><MetricCard title="AI analyzed" value={analyzed} detail="Recordings with a completed run" icon={BrainCircuit} tone="emerald"/><MetricCard title="Detection events" value={events} detail="Persisted person detections" icon={Activity} tone="amber"/></section>
 
-      if (!response.ok) throw new Error("Unable to load recordings.");
+    <section id="upload-panel" className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Import surveillance footage" subtitle="Original media and preview frames remain on this host" icon={Upload}/><div className="grid gap-4 p-4 md:grid-cols-[minmax(0,1.5fr)_minmax(240px,.7fr)] md:p-5">
+      <form onSubmit={submitUpload} className="space-y-3"><label htmlFor="recording-upload" onDragOver={(event)=>{event.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)} onDrop={(event)=>{event.preventDefault();setDragging(false);chooseFile(event.dataTransfer.files[0]??null);}} className={`flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-4 py-5 text-center transition ${dragging?"border-cyan-300 bg-cyan-400/[0.08]":"border-[#344660] bg-[#0d1524]/70 hover:border-blue-400/50 hover:bg-blue-400/[0.03]"}`}>
+        <span className="rounded-xl border border-blue-400/20 bg-blue-500/10 p-3"><Upload size={19} className="text-cyan-200"/></span><span className="mt-3 text-xs font-medium text-slate-100">{file?file.name:"Drop a video file here or browse"}</span><span className="mt-1 text-[10px] text-slate-500">MP4 · MOV · MKV · AVI · WEBM · M4V · MPEG · MPG · up to 2 GiB</span><input id="recording-upload" type="file" accept=".mp4,.mov,.mkv,.avi,.webm,.m4v,.mpeg,.mpg,video/*" className="sr-only" onChange={(event)=>chooseFile(event.target.files?.[0]??null)}/>
+      </label><div className="flex flex-wrap items-center justify-between gap-3"><span className="text-[10px] text-slate-500">Video stream validation and frame extraction run locally.</span><button type="submit" disabled={!file||uploading} className="inline-flex items-center gap-2 rounded-lg bg-blue-500 px-4 py-2.5 text-[10px] font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-40">{uploading?<Loader2 size={14} className="animate-spin"/>:<Upload size={14}/>} {uploading?"Importing…":"Import recording"}</button></div>{uploading&&<div aria-live="polite"><div className="mb-1 flex justify-between text-[9px] text-slate-400"><span>{progress===100?"Validating video and extracting frames":"Uploading original footage"}</span><span>{progress}%</span></div><div className="h-1.5 overflow-hidden rounded bg-[#25334a]"><div role="progressbar" aria-label="Video upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} className="h-full rounded bg-cyan-400 transition-[width]" style={{width:`${progress}%`}}/></div></div>}</form>
+      <div className="flex flex-col justify-between rounded-xl border border-[#25334a] bg-[#0d1524] p-4"><div><div className="flex items-center gap-2 text-[10px] font-semibold text-slate-200"><Fingerprint size={14} className="text-cyan-300"/>Evidence integrity</div><p className="mt-2 text-[10px] leading-relaxed text-slate-500">The imported original is fingerprinted with SHA-256. Browser-compatible playback copies are stored separately when conversion is needed.</p></div><div className="mt-4 flex items-center gap-2 text-[9px] text-emerald-300"><CheckCircle2 size={13}/>Local processing · no cloud upload</div></div>
+    </div></section>
 
-      const data = await response.json();
-      setRecordings(data.recordings ?? []);
-      setError("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Backend connection failed.");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    {(error||notice)&&<div role={error?"alert":"status"} className={`flex items-center gap-2 rounded-lg border px-4 py-3 text-[11px] ${error?"border-red-400/20 bg-red-400/[0.05] text-red-200":"border-emerald-400/20 bg-emerald-400/[0.05] text-emerald-200"}`}>{error?<AlertCircle size={15}/>:<CheckCircle2 size={15}/>}<span>{error||notice}</span><button onClick={()=>{setError("");setNotice("");}} aria-label="Dismiss message" className="ml-auto text-current opacity-60 hover:opacity-100">×</button></div>}
 
-  useEffect(() => {
-    void Promise.resolve().then(loadRecordings);
-  }, [loadRecordings]);
-
-  async function uploadVideo(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    if (!selectedFile) {
-      setError("Choose a video file first.");
-      return;
-    }
-
-    const allowedExtensions = [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"];
-    const extension = selectedFile.name.slice(selectedFile.name.lastIndexOf(".")).toLowerCase();
-    if (!allowedExtensions.includes(extension)) {
-      setError("Choose a supported video file (MP4, MOV, MKV, AVI, WEBM, M4V, MPEG, or MPG).");
-      return;
-    }
-    if (selectedFile.size > 2 * 1024 * 1024 * 1024) {
-      setError("Video exceeds the 2 GB upload limit.");
-      return;
-    }
-
-    setUploading(true);
-    setUploadProgress(0);
-    setError("");
-    setSuccess("");
-
-    try {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
-
-      const data = await new Promise<UploadResult>((resolve, reject) => {
-        const request = new XMLHttpRequest();
-        request.open("POST", `${API_URL}/api/v1/recordings`);
-        request.upload.onprogress = (progress) => {
-          if (progress.lengthComputable) setUploadProgress(Math.round((progress.loaded / progress.total) * 100));
-        };
-        request.onerror = () => reject(new Error("Network error while uploading the video."));
-        request.onload = () => {
-          let payload: UploadResult & { detail?: string };
-          try { payload = JSON.parse(request.responseText) as UploadResult & { detail?: string }; }
-          catch { reject(new Error("The backend returned an unreadable upload response.")); return; }
-          if (request.status < 200 || request.status >= 300) reject(new Error(payload.detail || "Video upload failed."));
-          else resolve(payload);
-        };
-        request.send(formData);
-      });
-
-      setSuccess(
-        `Successfully imported ${data.filename}. ${data.frame_count} frames extracted.`
-      );
-      setSelectedFile(null);
-
-      const fileInput = document.getElementById(
-        "video-upload"
-      ) as HTMLInputElement | null;
-
-      if (fileInput) fileInput.value = "";
-
-      await loadRecordings();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Upload failed.");
-    } finally {
-      setUploading(false);
-      setUploadProgress(0);
-    }
-  }
-
-  async function toggleFrames(recordingId: string) {
-    if (expandedId === recordingId) {
-      setExpandedId(null);
-      return;
-    }
-
-    setExpandedId(recordingId);
-
-    if (frames[recordingId]) return;
-
-    setFrameLoading(recordingId);
-
-    try {
-      const response = await fetch(
-        `${API_URL}/api/v1/recordings/${recordingId}/frames`
-      );
-
-      if (!response.ok) throw new Error("Unable to retrieve frames.");
-
-      const data: FrameResponse = await response.json();
-
-      setFrames((previous) => ({
-        ...previous,
-        [recordingId]: data.frames,
-      }));
-    } catch {
-      setError("Unable to load extracted frames.");
-    } finally {
-      setFrameLoading(null);
-    }
-  }
-
-  async function copyHash(hash: string) {
-    try {
-      await navigator.clipboard.writeText(hash);
-      setSuccess("SHA-256 fingerprint copied to clipboard.");
-    } catch {
-      setError("Could not copy the fingerprint.");
-    }
-  }
-
-  async function deleteRecording(recording: Recording) {
-    if (!window.confirm(`Delete “${recording.original_filename}” and all associated detection evidence? This cannot be undone.`)) return;
-    setDeletingId(recording.id);
-    setError("");
-    try {
-      const response = await fetch(`${API_URL}/api/v1/recordings/${recording.id}`, { method: "DELETE" });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || "Unable to delete recording.");
-      setRecordings((items) => items.filter((item) => item.id !== recording.id));
-      setFrames((items) => { const next = { ...items }; delete next[recording.id]; return next; });
-      setSuccess(result.cleanup_pending ? "Recording removed; its local files need cleanup by an administrator." : "Recording and associated evidence deleted.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Recording deletion failed.");
-    } finally {
-      setDeletingId(null);
-    }
-  }
-
-  const visibleRecordings = recordings
-    .filter((item) => item.original_filename.toLowerCase().includes(search.toLowerCase()))
-    .filter((item) => statusFilter === "all" || item.status === statusFilter)
-    .filter((item) => {
-      if (analysisFilter === "all") return true;
-      if (analysisFilter === "not_analyzed") return !item.analysis_status;
-      if (analysisFilter === "active") return item.analysis_status === "queued" || item.analysis_status === "running";
-      return item.analysis_status === analysisFilter;
-    })
-    .sort((left, right) => sortBy === "largest"
-      ? right.file_size - left.file_size
-      : new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
-
-  return (
-    <main className="min-h-screen bg-[#090e15] text-slate-200">
-      <header className="flex h-20 items-center justify-between border-b border-white/[0.07] bg-[#0c131d] px-5 md:px-8">
-        <div>
-          <Link
-            href="/"
-            className="mb-1 flex items-center gap-2 text-xs text-slate-500 hover:text-cyan-400"
-          >
-            <ArrowLeft size={14} /> Back to overview
-          </Link>
-          <h1 className="text-lg font-semibold text-white">
-            Video recordings
-          </h1>
-        </div>
-
-        <div className="flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.06] px-3 py-2 text-xs text-emerald-400">
-          <ShieldCheck size={15} />
-          Local storage
-        </div>
-      </header>
-
-      <div className="mx-auto max-w-6xl space-y-7 p-5 md:p-8">
-        <section>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-400">
-            Video intelligence
-          </p>
-          <h2 className="mt-3 text-2xl font-semibold text-white md:text-3xl">
-            Recording library
-          </h2>
-          <p className="mt-2 text-sm text-slate-400">
-            Import, inspect and manage your surveillance video evidence.
-          </p>
-        </section>
-
-        <section className="grid gap-4 sm:grid-cols-3">
-          <div className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
-            <FileVideo className="text-cyan-400" size={20} />
-            <p className="mt-4 text-2xl font-semibold text-white">
-              {recordings.length}
-            </p>
-            <p className="mt-1 text-xs text-slate-500">Imported recordings</p>
+    <section className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Video library" subtitle={`${visible.length} shown · ${recordings.length} total`} icon={FileVideo2} action={<button onClick={()=>{setLoading(true);void load();}} aria-label="Refresh recording library" className="rounded-md border border-[#25334a] p-2 text-slate-400 hover:text-white"><RefreshCw size={13}/></button>}/>
+      <div className="grid gap-2 border-b border-[#25334a] bg-[#0d1524]/45 p-3 sm:grid-cols-2 xl:grid-cols-[minmax(230px,1.3fr)_repeat(3,minmax(145px,.7fr))]"><label className="relative"><Search size={14} className="absolute left-3 top-2.5 text-slate-500"/><input value={search} onChange={(event)=>setSearch(event.target.value)} aria-label="Search recordings by filename" placeholder="Search recordings…" className="w-full rounded-lg border border-[#25334a] bg-[#080d17] py-2.5 pl-9 pr-3 text-[10px] text-slate-100 outline-none placeholder:text-slate-600 focus:border-blue-400/50"/></label><select value={status} onChange={(event)=>setStatus(event.target.value)} aria-label="Filter video processing status" className="rounded-lg border border-[#25334a] bg-[#080d17] px-3 py-2.5 text-[10px] text-slate-300"><option value="all">All import states</option><option value="processed">Ready</option><option value="failed">Import failed</option></select><select value={analysis} onChange={(event)=>setAnalysis(event.target.value)} aria-label="Filter AI analysis status" className="rounded-lg border border-[#25334a] bg-[#080d17] px-3 py-2.5 text-[10px] text-slate-300"><option value="all">All AI analysis states</option><option value="not_analyzed">Not analyzed</option><option value="active">Analysis active</option><option value="completed">Analysis complete</option><option value="failed">Analysis failed</option></select><select value={sort} onChange={(event)=>setSort(event.target.value)} aria-label="Sort recordings" className="rounded-lg border border-[#25334a] bg-[#080d17] px-3 py-2.5 text-[10px] text-slate-300"><option value="newest">Newest first</option><option value="largest">Largest first</option></select></div>
+      {loading?<LoadingState label="Loading recordings"/>:visible.length===0?<EmptyState title={recordings.length?"No matches for these filters":"No recordings in the library"} description={recordings.length?"Adjust the search or filters to see other stored footage.":"Upload the first video above. Its original and extracted previews will be stored locally."} icon={Video}/>:<div className="grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">{visible.map((item,index)=>{
+        const tone=analysisTone(item.analysis_status);
+        return <article key={item.id} className="group overflow-hidden rounded-xl border border-[#25334a] bg-[#0d1524] transition hover:border-blue-400/35 hover:shadow-xl hover:shadow-black/20">
+          <Link href={`/recordings/${item.id}`} className="relative block aspect-video overflow-hidden bg-[#08111e]">{item.thumbnail_url?<Image unoptimized width={720} height={405} loading={index===0?"eager":"lazy"} src={`${API}${item.thumbnail_url}`} alt={`Preview frame from ${item.original_filename}`} className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.025]"/>:<div className="grid h-full place-items-center"><Video size={27} className="text-slate-700"/></div>}<span className="absolute inset-0 grid place-items-center bg-black/0 opacity-0 transition group-hover:bg-black/20 group-hover:opacity-100"><span className="rounded-full border border-white/30 bg-black/60 p-3"><Play size={17} fill="white" className="text-white"/></span></span><span className="absolute left-2.5 top-2.5"><StatusPill label={item.analysis_status??"Not analyzed"} tone={tone}/></span><span className="absolute bottom-2.5 right-2.5 rounded border border-white/10 bg-black/75 px-2 py-1 text-[9px] text-white">{duration(item.duration)}</span></Link>
+          <div className="p-3.5"><Link href={`/recordings/${item.id}`} className="block truncate text-[11px] font-semibold text-slate-100 hover:text-cyan-200" title={item.original_filename}>{item.original_filename}</Link><div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] text-slate-500"><span>{bytes(item.file_size)}</span><span>{item.width??"?"}×{item.height??"?"}</span><span>{item.frame_count} previews</span><span>{item.detection_count} events</span></div><div className="mt-2.5 flex items-center justify-between border-t border-[#25334a]/70 pt-2.5"><span className="inline-flex items-center gap-1 text-[9px] text-slate-600"><Clock3 size={11}/>{new Date(item.created_at).toLocaleDateString("en-US",{month:"short",day:"2-digit",year:"numeric",timeZone:"UTC"})}</span><div className="flex items-center gap-1"><button onClick={()=>void copyHash(item.sha256)} title="Copy SHA-256" aria-label={`Copy fingerprint for ${item.original_filename}`} className="rounded-md p-2 text-slate-500 hover:bg-white/[0.04] hover:text-cyan-200"><Copy size={13}/></button><button onClick={()=>void toggleFrames(item)} title="Preview extracted frames" aria-label={`Preview frames from ${item.original_filename}`} className="rounded-md p-2 text-slate-500 hover:bg-white/[0.04] hover:text-cyan-200"><ImageIcon size={13}/></button><button onClick={()=>void deleteItem(item)} disabled={deleteBusy===item.id} title="Delete recording and evidence" aria-label={`Delete ${item.original_filename}`} className="rounded-md p-2 text-slate-500 hover:bg-red-400/10 hover:text-red-300 disabled:opacity-50">{deleteBusy===item.id?<Loader2 size={13} className="animate-spin"/>:<Trash2 size={13}/>}</button></div></div>
+          {expanded===item.id&&<div className="mt-2 border-t border-[#25334a] pt-3">{frameBusy===item.id?<span className="inline-flex items-center gap-2 text-[10px] text-slate-500"><Loader2 size={12} className="animate-spin"/>Loading preview frames</span>:frames[item.id]?.length?<div className="grid grid-cols-2 gap-2">{frames[item.id].slice(0,4).map((frame,index)=><a key={frame} href={`${API}${frame}`} target="_blank" rel="noreferrer" title={`Open preview frame ${index+1}`}><Image unoptimized width={320} height={180} src={`${API}${frame}`} alt={`Frame ${index+1} from ${item.original_filename}`} className="aspect-video w-full rounded-md border border-[#25334a] object-cover"/></a>)}</div>:<p className="text-[9px] text-slate-500">No extracted frames are available.</p>}</div>}
           </div>
-
-          <div className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
-            <HardDrive className="text-cyan-400" size={20} />
-            <p className="mt-4 text-2xl font-semibold text-white">
-              {formatBytes(
-                recordings.reduce((total, item) => total + item.file_size, 0)
-              )}
-            </p>
-            <p className="mt-1 text-xs text-slate-500">Total video storage</p>
-          </div>
-
-          <div className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
-            <ImageIcon className="text-cyan-400" size={20} />
-            <p className="mt-4 text-2xl font-semibold text-white">
-              {recordings.reduce(
-                (total, item) => total + item.frame_count,
-                0
-              )}
-            </p>
-            <p className="mt-1 text-xs text-slate-500">Extracted frames</p>
-          </div>
-        </section>
-
-        <section className="rounded-xl border border-white/[0.07] bg-[#111923] p-5 md:p-6">
-          <div className="flex items-center gap-3">
-            <div className="rounded-lg bg-cyan-400/10 p-2.5">
-              <Upload className="text-cyan-400" size={20} />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-white">
-                Import surveillance footage
-              </h3>
-              <p className="mt-1 text-xs text-slate-500">
-                Upload a video for metadata extraction and forensic processing.
-              </p>
-            </div>
-          </div>
-
-          <form onSubmit={uploadVideo} className="mt-6 space-y-4">
-            <label
-              htmlFor="video-upload"
-              className="flex min-h-32 cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-white/[0.02] p-5 text-center transition hover:border-cyan-400/50 hover:bg-cyan-400/[0.03]"
-            >
-              <Upload size={25} className="text-cyan-400" />
-              <span className="mt-3 text-sm font-medium text-slate-200">
-                {selectedFile ? selectedFile.name : "Choose a video recording"}
-              </span>
-              <span className="mt-1 text-xs text-slate-500">
-                MP4, MOV, MKV, AVI, WEBM and other supported formats · Maximum
-                2 GB
-              </span>
-              <input
-                id="video-upload"
-                type="file"
-                accept=".mp4,.mov,.mkv,.avi,.webm,.m4v,.mpeg,.mpg,video/*"
-                className="hidden"
-                onChange={(event) => {
-                  setSelectedFile(event.target.files?.[0] ?? null);
-                  setError("");
-                  setSuccess("");
-                }}
-              />
-            </label>
-
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-[11px] text-slate-500">
-                Original footage is retained separately from extracted frames.
-              </p>
-
-              <button
-                type="submit"
-                disabled={!selectedFile || uploading}
-                className="flex items-center gap-2 rounded-lg bg-cyan-500 px-5 py-2.5 text-xs font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {uploading ? (
-                  <>
-                    <Loader2 size={15} className="animate-spin" />
-                    Processing video...
-                  </>
-                ) : (
-                  <>
-                    <Upload size={15} />
-                    Import recording
-                  </>
-                )}
-              </button>
-            </div>
-            {uploading && <div aria-live="polite"><div className="mb-1 flex justify-between text-[11px] text-slate-400"><span>{uploadProgress === 100 ? "Upload complete · validating and processing locally" : "Uploading video"}</span><span>{uploadProgress}%</span></div><div role="progressbar" aria-label="Video upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={uploadProgress} className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-cyan-400 transition-[width]" style={{ width: `${uploadProgress}%` }} /></div></div>}
-          </form>
-
-          {error && (
-            <div className="mt-4 flex items-start gap-2 rounded-lg border border-red-400/20 bg-red-400/[0.06] p-3 text-xs text-red-300">
-              <AlertCircle size={16} className="shrink-0" />
-              {error}
-            </div>
-          )}
-
-          {success && (
-            <div className="mt-4 flex items-start gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.06] p-3 text-xs text-emerald-300">
-              <CheckCircle2 size={16} className="shrink-0" />
-              {success}
-            </div>
-          )}
-        </section>
-
-        <section className="overflow-hidden rounded-xl border border-white/[0.07] bg-[#111923]">
-          <div className="flex items-center justify-between border-b border-white/[0.07] p-5">
-            <div>
-              <h3 className="text-sm font-semibold text-white">
-                Imported recordings
-              </h3>
-              <p className="mt-1 text-xs text-slate-500">
-                Stored video evidence and processing results
-              </p>
-            </div>
-            <button
-              onClick={loadRecordings}
-              className="rounded-lg border border-white/[0.08] p-2 text-slate-400 hover:bg-white/[0.05]"
-              aria-label="Refresh recordings"
-            >
-              <RefreshCw size={16} />
-            </button>
-          </div>
-
-          <div className="grid gap-3 border-b border-white/[0.06] p-4 sm:grid-cols-2 lg:grid-cols-4">
-            <label className="relative sm:col-span-2 lg:col-span-1"><Search size={15} className="absolute left-3 top-3 text-slate-500"/><input aria-label="Search recordings by filename" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search filename" className="w-full rounded-lg border border-white/10 bg-[#0b1119] py-2.5 pl-9 pr-3 text-xs text-white outline-none focus:border-cyan-400/40"/></label>
-            <label className="sr-only" htmlFor="recording-status">Recording status</label><select id="recording-status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-xs text-white"><option value="all">All processing statuses</option><option value="processed">Processed</option><option value="failed">Failed</option></select>
-            <label className="sr-only" htmlFor="analysis-status">Analysis status</label><select id="analysis-status" value={analysisFilter} onChange={(event) => setAnalysisFilter(event.target.value)} className="rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-xs text-white"><option value="all">All analysis statuses</option><option value="not_analyzed">Not analyzed</option><option value="queued">Queued</option><option value="running">Analyzing</option><option value="completed">Analyzed</option><option value="failed">Analysis failed</option></select>
-            <label className="sr-only" htmlFor="recording-sort">Sort recordings</label><select id="recording-sort" value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-xs text-white"><option value="newest">Newest first</option><option value="largest">Largest first</option></select>
-          </div>
-
-          {loading ? (
-            <div className="flex justify-center p-12">
-              <Loader2 className="animate-spin text-cyan-400" />
-            </div>
-          ) : recordings.length === 0 ? (
-            <div className="flex flex-col items-center justify-center px-5 py-14 text-center">
-              <FileVideo size={30} className="text-slate-600" />
-              <p className="mt-4 text-sm text-slate-300">
-                No recordings imported yet
-              </p>
-              <p className="mt-2 text-xs text-slate-500">
-                Upload your first CCTV recording above.
-              </p>
-            </div>
-          ) : visibleRecordings.length === 0 ? (
-            <p className="p-8 text-center text-sm text-slate-400">No recordings match these search and filter settings.</p>
-          ) : (
-            <div className="divide-y divide-white/[0.06]">
-              {visibleRecordings.map((recording) => (
-                <div key={recording.id} className="p-5">
-                  <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
-                    <div className="flex min-w-0 items-start gap-3">
-                      <div className="rounded-lg bg-cyan-400/10 p-3">
-                        <FileVideo className="text-cyan-400" size={20} />
-                      </div>
-                      <div className="min-w-0">
-                        <h4 className="break-all text-sm font-medium text-white">
-                          {recording.original_filename}
-                        </h4>
-                        <p className="mt-1 text-[11px] text-slate-500">
-                          {new Date(recording.created_at).toLocaleString()}
-                        </p>
-                        <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-slate-400">
-                          <span>{formatBytes(recording.file_size)}</span>
-                          <span>
-                            {recording.width} × {recording.height}
-                          </span>
-                          <span>{formatDuration(recording.duration)}</span>
-                          <span>{recording.frame_count} frames</span>
-                          <span>{recording.video_codec}</span>
-                          <span>Analysis: {recording.analysis_status ?? "Not analyzed"}</span>
-                          <span>
-                            Playback: {
-                              recording.playback_status === "converted"
-                                ? "H.264 copy ready"
-                                : recording.playback_status === "failed"
-                                  ? "Conversion unavailable"
-                                  : "Original"
-                            }
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex shrink-0 flex-wrap items-center gap-2">
-                      <Link
-                        href={`/recordings/${recording.id}`}
-                        className="flex items-center justify-center gap-2 rounded-lg bg-cyan-500 px-4 py-2.5 text-xs font-semibold text-slate-950 transition hover:bg-cyan-400"
-                      >
-                        <FileVideo size={15} />
-                        Open recording
-                      </Link>
-
-                      <button
-                        onClick={() => toggleFrames(recording.id)}
-                        className="flex items-center justify-center gap-2 rounded-lg border border-cyan-400/20 bg-cyan-400/[0.05] px-4 py-2.5 text-xs font-medium text-cyan-300 hover:bg-cyan-400/10"
-                      >
-                        <ImageIcon size={15} />
-                        {expandedId === recording.id
-                          ? "Hide frames"
-                          : "Inspect frames"}
-                      </button>
-                      <button onClick={() => deleteRecording(recording)} disabled={deletingId === recording.id} aria-label={`Delete ${recording.original_filename}`} title="Delete recording and evidence" className="flex items-center justify-center gap-2 rounded-lg border border-red-400/20 px-3 py-2.5 text-xs text-red-300 hover:bg-red-400/10 disabled:opacity-50">
-                        {deletingId === recording.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}{deletingId === recording.id ? "Deleting" : "Delete"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 rounded-lg border border-white/[0.06] bg-black/10 p-3">
-                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                      <Fingerprint size={14} />
-                      SHA-256 fingerprint
-                    </div>
-                    <div className="mt-2 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                      <code className="break-all text-[10px] leading-relaxed text-cyan-300">
-                        {recording.sha256}
-                      </code>
-                      <button
-                        onClick={() => copyHash(recording.sha256)}
-                        className="flex shrink-0 items-center gap-2 text-xs text-slate-400 hover:text-white"
-                      >
-                        <Copy size={13} />
-                        Copy
-                      </button>
-                    </div>
-                  </div>
-
-                  {expandedId === recording.id && (
-                    <div className="mt-5 border-t border-white/[0.06] pt-5">
-                      <h5 className="mb-4 flex items-center gap-2 text-xs font-semibold text-white">
-                        <ImageIcon size={15} className="text-cyan-400" />
-                        Extracted video frames
-                      </h5>
-
-                      {frameLoading === recording.id ? (
-                        <Loader2 className="animate-spin text-cyan-400" />
-                      ) : frames[recording.id]?.length ? (
-                        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                          {frames[recording.id].map((frame, index) => (
-                            <div
-                              key={frame}
-                              className="overflow-hidden rounded-lg border border-white/[0.08] bg-black/20"
-                            >
-                              <a
-                                href={`${API_URL}${frame}`}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                <Image
-                                  unoptimized
-                                  width={640}
-                                  height={360}
-                                  src={`${API_URL}${frame}`}
-                                  alt={`Extracted frame ${index + 1}`}
-                                  className="aspect-video w-full object-contain"
-                                />
-                              </a>
-                              <p className="p-2 text-[10px] text-slate-500">
-                                Frame {index + 1} · {frame.split("/").pop()}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-slate-500">
-                          No frames are available for this recording.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <footer className="flex items-center gap-2 border-t border-white/[0.06] pt-5 text-[10px] text-slate-600">
-          <LockKeyholeIcon />
-          BlackBox Home Guard · Local video evidence library
-        </footer>
-      </div>
-    </main>
-  );
-}
-
-function LockKeyholeIcon() {
-  return <ShieldCheck size={14} className="text-emerald-500" />;
+        </article>;
+      })}</div>}
+    </section>
+    <footer className="flex items-center justify-between border-t border-[#25334a] pt-4 text-[9px] text-slate-600"><span>Original footage stays on this host.</span><span>{recordings.reduce((sum,item)=>sum+item.frame_count,0)} extracted preview frames · {events} detections</span></footer>
+  </div></AppShell>;
 }

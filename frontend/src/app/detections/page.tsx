@@ -2,64 +2,28 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowRight, CalendarDays, Clock3, Download, Fingerprint, Search, ShieldAlert } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
+import { EmptyState, LoadingState, PanelHeader, StatusPill } from "@/components/ui";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
-type Detection = {
-  id: string; recording_id: string; analysis_id: string; original_filename: string;
-  timestamp_seconds: number; confidence: number; detection_type: string;
-  evidence_url: string; bbox_x: number; bbox_y: number; bbox_width: number; bbox_height: number;
-};
+const API=process.env.NEXT_PUBLIC_API_URL??"http://127.0.0.1:8000";
+type Event={id:string;recording_id:string;analysis_id:string;original_filename:string;timestamp_seconds:number;confidence:number;detection_type:string;evidence_url:string;bbox_x:number;bbox_y:number;bbox_width:number;bbox_height:number;created_at:string};
+type Recording={id:string;original_filename:string};
+function mediaTime(seconds:number){const n=Math.max(0,Math.floor(seconds));return `${Math.floor(n/60).toString().padStart(2,"0")}:${(n%60).toString().padStart(2,"0")}`;}
+function dayLabel(day:string){const [year,month,date]=day.split("-");const names=["January","February","March","April","May","June","July","August","September","October","November","December"];return month?`${names[Number(month)-1]} ${Number(date)}, ${year}`:"Undated events";}
 
-export default function DetectionsPage() {
-  const [items, setItems] = useState<Detection[]>([]);
-  const [recordingNames, setRecordingNames] = useState<Record<string, string>>({});
-  const [recordingFilter, setRecordingFilter] = useState("all");
-  const [typeFilter, setTypeFilter] = useState("all");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-      try {
-        const params = new URLSearchParams({ limit: "500" });
-        if (recordingFilter !== "all") params.set("recording_id", recordingFilter);
-        if (typeFilter !== "all") params.set("detection_type", typeFilter);
-        const response = await fetch(`${API}/api/v1/detections?${params}`, { cache: "no-store" });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.detail || "Unable to load detection events.");
-        if (!cancelled) {
-          setItems(result.detections ?? []);
-          setRecordingNames((previous) => ({ ...previous, ...Object.fromEntries((result.detections ?? []).map((item: Detection) => [item.recording_id, item.original_filename])) }));
-          setError("");
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Backend connection failed.");
-      } finally { if (!cancelled) setLoading(false); }
-    };
-    void Promise.resolve().then(load);
-    return () => { cancelled = true; };
-  }, [recordingFilter, typeFilter]);
-
-  const recordingOptions = Object.entries(recordingNames);
-
-  return <main className="min-h-screen bg-[#090e15] p-5 text-slate-200 md:p-8"><div className="mx-auto max-w-6xl">
-    <Link href="/" className="text-xs text-cyan-300">← Overview</Link>
-    <h1 className="mt-4 text-2xl font-semibold text-white">Detection timeline</h1>
-    <p className="mt-2 text-sm text-slate-400">Local person detections with recording time, confidence, and bounding-box details.</p>
-    <div className="mt-6 grid gap-3 rounded-xl border border-white/[0.08] bg-[#111923] p-4 sm:grid-cols-2">
-      <label className="text-xs text-slate-400">Recording<select value={recordingFilter} onChange={(event) => setRecordingFilter(event.target.value)} className="mt-2 w-full rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-white"><option value="all">All recordings</option>{recordingOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
-      <label className="text-xs text-slate-400">Detection type<select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} className="mt-2 w-full rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-white"><option value="all">All types</option><option value="person">Person</option></select></label>
-    </div>
-    {error && <p role="alert" className="mt-5 rounded-lg border border-red-400/20 bg-red-400/[0.06] p-4 text-sm text-red-300">{error}</p>}
-    {loading ? <div className="flex justify-center py-16"><Loader2 className="animate-spin text-cyan-400"/></div> : !items.length ? <p className="mt-6 rounded-xl border border-white/10 bg-[#111923] p-6 text-sm text-slate-400">No detection events match these filters.</p> : <div className="mt-6 space-y-3">{items.map((event) => <article key={event.id} className="flex flex-wrap items-center gap-4 rounded-xl border border-white/[0.08] bg-[#111923] p-4">
-      <Link href={`/recordings/${event.recording_id}?t=${event.timestamp_seconds}`} aria-label={`Open ${event.original_filename} at ${event.timestamp_seconds.toFixed(1)} seconds`}><Image unoptimized width={128} height={80} src={`${API}${event.evidence_url}`} alt="Annotated person detection evidence" className="h-20 w-32 rounded object-cover"/></Link>
-      <div className="min-w-48 flex-1"><p className="text-sm font-medium text-white">{event.detection_type} · {event.original_filename}</p><p className="mt-1 text-xs text-slate-400">{event.timestamp_seconds.toFixed(2)} seconds · {(event.confidence * 100).toFixed(1)}% confidence</p><p className="mt-1 text-[11px] text-slate-500">Box: x {event.bbox_x}, y {event.bbox_y}, {event.bbox_width} × {event.bbox_height}px</p><p className="mt-1 text-[10px] text-slate-600">Analysis {event.analysis_id}</p></div>
-      <Link className="text-xs text-cyan-300" href={`/recordings/${event.recording_id}?t=${event.timestamp_seconds}`}>Open recording →</Link>
-      <a className="text-xs text-slate-300" href={`${API}${event.evidence_url}`} download>Download evidence</a>
-    </article>)}</div>}
-  </div></main>;
+export default function DetectionsPage(){
+  const [events,setEvents]=useState<Event[]>([]);const [recordings,setRecordings]=useState<Recording[]>([]);const [recording,setRecording]=useState("all");const [kind,setKind]=useState("all");const [search,setSearch]=useState("");const [loading,setLoading]=useState(true);const [error,setError]=useState("");
+  const loadRecordings=useCallback(async()=>{try{const response=await fetch(`${API}/api/v1/recordings`,{cache:"no-store"});if(response.ok){const data=await response.json();setRecordings(data.recordings??[]);}}catch{/* the event request displays the shared offline state */}},[]);
+  useEffect(()=>{void Promise.resolve().then(loadRecordings);},[loadRecordings]);
+  useEffect(()=>{let active=true;const load=async()=>{setLoading(true);try{const params=new URLSearchParams({limit:"500"});if(recording!=="all")params.set("recording_id",recording);if(kind!=="all")params.set("detection_type",kind);const response=await fetch(`${API}/api/v1/detections?${params}`,{cache:"no-store"});const data=await response.json();if(!response.ok)throw new Error(data.detail||"Unable to load the event timeline.");if(active){setEvents(data.detections??[]);setError("");}}catch(cause){if(active)setError(cause instanceof Error?cause.message:"Backend connection failed.");}finally{if(active)setLoading(false);}};void Promise.resolve().then(load);return()=>{active=false;};},[recording,kind]);
+  const visible=useMemo(()=>events.filter((event)=>event.original_filename.toLowerCase().includes(search.trim().toLowerCase())),[events,search]);
+  const groups=useMemo(()=>{const result=new Map<string,Event[]>();for(const event of visible){const key=event.created_at.slice(0,10)||"Undated";result.set(key,[...(result.get(key)??[]),event]);}return [...result.entries()];},[visible]);
+  return <AppShell title="Incident timeline"><div className="mx-auto max-w-[1500px] space-y-5 p-4 sm:p-6 xl:p-7">
+    <section className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-[9px] font-semibold uppercase tracking-[.22em] text-blue-300">Forensic event review</p><h1 className="mt-2 text-2xl font-semibold text-white sm:text-[30px]">Incident timeline</h1><p className="mt-1.5 text-xs text-slate-400">Chronological person-detection events from completed local video analyses.</p></div><StatusPill label={`${visible.length} events`} tone="blue"/></section>
+    <section className="surface-panel overflow-hidden rounded-xl"><PanelHeader title="Filter events" subtitle="Filters use actual persisted recording and detection fields" icon={ShieldAlert}/><div className="grid gap-2 p-3 sm:grid-cols-2 xl:grid-cols-[minmax(240px,1fr)_minmax(220px,.8fr)_minmax(180px,.7fr)]"><label className="relative"><Search size={14} className="absolute left-3 top-2.5 text-slate-500"/><input value={search} onChange={(event)=>setSearch(event.target.value)} placeholder="Search by recording name" className="w-full rounded-lg border border-[#25334a] bg-[#080d17] py-2.5 pl-9 pr-3 text-[10px] text-slate-100 outline-none focus:border-blue-400/45"/></label><select aria-label="Filter events by recording" value={recording} onChange={(event)=>setRecording(event.target.value)} className="rounded-lg border border-[#25334a] bg-[#080d17] px-3 py-2.5 text-[10px] text-slate-300"><option value="all">All recordings</option>{recordings.map((item)=><option key={item.id} value={item.id}>{item.original_filename}</option>)}</select><select aria-label="Filter by event type" value={kind} onChange={(event)=>setKind(event.target.value)} className="rounded-lg border border-[#25334a] bg-[#080d17] px-3 py-2.5 text-[10px] text-slate-300"><option value="all">All detection types</option><option value="person">Person</option></select></div></section>
+    {error&&<p role="alert" className="rounded-lg border border-red-400/20 bg-red-400/[0.05] p-3 text-xs text-red-200">{error}</p>}
+    <section className="space-y-5">{loading?<div className="surface-panel rounded-xl"><LoadingState label="Loading event timeline"/></div>:groups.length?groups.map(([day,items])=><div key={day} className="surface-panel overflow-hidden rounded-xl"><div className="flex items-center justify-between border-b border-[#25334a] bg-[#0d1524]/55 px-4 py-3"><span className="inline-flex items-center gap-2 text-[11px] font-semibold text-slate-200"><CalendarDays size={14} className="text-cyan-300"/>{dayLabel(day)}</span><span className="text-[9px] text-slate-500">{items.length} {items.length===1?"event":"events"}</span></div><div className="divide-y divide-[#25334a]/70">{items.map((event)=><article key={event.id} className="grid gap-3 p-3 sm:grid-cols-[150px_minmax(0,1fr)_auto] sm:items-center sm:p-4"><Link href={`/recordings/${event.recording_id}?t=${event.timestamp_seconds}`} className="relative aspect-video overflow-hidden rounded-lg border border-[#25334a] bg-[#08111e] sm:aspect-[4/3]"><Image unoptimized width={400} height={260} src={`${API}${event.evidence_url}`} alt={`Evidence frame for ${event.detection_type} detection`} className="h-full w-full object-cover"/><span className="absolute bottom-1.5 left-1.5 rounded bg-black/80 px-1.5 py-1 text-[9px] text-white">{mediaTime(event.timestamp_seconds)}</span></Link><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><StatusPill label={event.detection_type} tone="cyan"/><span className="text-[10px] text-slate-400">{(event.confidence*100).toFixed(1)}% confidence</span></div><p className="mt-2 truncate text-xs font-semibold text-white">{event.original_filename}</p><p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] text-slate-500"><span className="inline-flex items-center gap-1"><Clock3 size={11}/>Video timestamp {mediaTime(event.timestamp_seconds)}</span><span>Box {event.bbox_width}×{event.bbox_height}px at {event.bbox_x},{event.bbox_y}</span></p><p className="mt-1.5 truncate text-[9px] text-slate-600">Analysis {event.analysis_id}</p></div><div className="flex items-center gap-2 sm:flex-col sm:items-end"><Link href={`/recordings/${event.recording_id}?t=${event.timestamp_seconds}`} className="inline-flex items-center gap-1 rounded-md border border-[#25334a] px-2.5 py-2 text-[9px] text-slate-300 hover:border-blue-400/30 hover:text-white">Open video <ArrowRight size={12}/></Link><a href={`${API}${event.evidence_url}`} download className="inline-flex items-center gap-1 px-2 py-1.5 text-[9px] text-slate-500 hover:text-cyan-200"><Download size={11}/>Evidence</a></div></article>)}</div></div>):<div className="surface-panel rounded-xl"><EmptyState title="No events match these filters" description="Adjust the filters or run person analysis on one of your uploaded recordings." icon={Fingerprint}/></div>}</section>
+  </div></AppShell>;
 }
