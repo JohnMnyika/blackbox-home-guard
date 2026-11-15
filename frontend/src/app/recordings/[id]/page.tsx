@@ -2,7 +2,8 @@
 
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import Image from "next/image";
+import { useParams, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
   Calendar,
@@ -15,6 +16,8 @@ import {
   Loader2,
   ShieldCheck,
   AlertCircle,
+  BrainCircuit,
+  Play,
 } from "lucide-react";
 
 const API_URL =
@@ -35,12 +38,19 @@ type Recording = {
   status: string;
   created_at: string;
   metadata: Record<string, unknown>;
+  playback_path?: string | null;
+  playback_size?: number | null;
+  playback_sha256?: string | null;
+  playback_codec?: string | null;
+  playback_format?: string | null;
+  playback_status?: "original" | "converted" | "failed";
 };
 
 type FrameData = {
   frames: string[];
   total: number;
 };
+type Detection = { id: string; analysis_id: string; timestamp_seconds: number; confidence: number; detection_type: string; evidence_url: string };
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
@@ -62,6 +72,8 @@ function formatDuration(seconds: number | null) {
 
 function RecordingDetailsContent() {
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
+  const requestedTimestamp = Number(searchParams.get("t"));
   const recordingId = params.id;
 
   const [recording, setRecording] = useState<Recording | null>(null);
@@ -69,6 +81,10 @@ function RecordingDetailsContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
+  const [detections, setDetections] = useState<Detection[]>([]);
+  const [intervalSeconds, setIntervalSeconds] = useState(2);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysisMessage, setAnalysisMessage] = useState("");
 
   useEffect(() => {
     if (!recordingId) return;
@@ -97,10 +113,13 @@ function RecordingDetailsContent() {
         const frameData: FrameData = framesResponse.ok
           ? await framesResponse.json()
           : { frames: [], total: 0 };
+        const detectionResponse = await fetch(`${API_URL}/api/v1/recordings/${recordingId}/detections`, { cache: "no-store" });
+        const detectionData = detectionResponse.ok ? await detectionResponse.json() : { detections: [] };
 
         if (!cancelled) {
           setRecording(recordingData);
           setFrames(frameData.frames ?? []);
+          setDetections(detectionData.detections ?? []);
         }
       } catch (err) {
         if (!cancelled) {
@@ -119,6 +138,27 @@ function RecordingDetailsContent() {
       cancelled = true;
     };
   }, [recordingId]);
+
+  async function runAnalysis() {
+    setAnalyzing(true);
+    setAnalysisMessage("Analysis is running locally. Larger videos may take a while.");
+    setError("");
+    try {
+      const response = await fetch(`${API_URL}/api/v1/recordings/${recordingId}/analyze?interval_seconds=${intervalSeconds}`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "Video analysis failed.");
+      const eventResponse = await fetch(`${API_URL}/api/v1/recordings/${recordingId}/detections?analysis_id=${data.analysis_id}`, { cache: "no-store" });
+      if (!eventResponse.ok) throw new Error("Analysis completed, but detections could not be loaded.");
+      const eventData = await eventResponse.json();
+      setDetections(eventData.detections ?? []);
+      setAnalysisMessage(`Analysis complete · ${data.analyzed_frames} frames · ${data.total_detections} detections · ${data.processing_seconds}s`);
+    } catch (err) {
+      setAnalysisMessage("");
+      setError(err instanceof Error ? err.message : "Video analysis failed.");
+    } finally {
+      setAnalyzing(false);
+    }
+  }
 
   async function copyHash() {
     if (!recording) return;
@@ -185,12 +225,32 @@ function RecordingDetailsContent() {
                 preload="metadata"
                 className="aspect-video max-h-[70vh] w-full bg-black"
                 src={`${API_URL}/api/v1/recordings/${recording.id}/video`}
+                onLoadedMetadata={(event) => {
+                  if (Number.isFinite(requestedTimestamp) && requestedTimestamp > 0) event.currentTarget.currentTime = requestedTimestamp;
+                }}
               >
                 Your browser cannot play this video format.
               </video>
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.07] bg-[#111923] px-4 py-3 text-[11px] text-slate-400">
-                <span>Original uploaded footage</span>
-                <span>Playback does not modify the stored evidence.</span>
+                <span>
+                  {recording.playback_status === "converted"
+                    ? "Compatible H.264 playback copy"
+                    : "Original uploaded footage"}
+                </span>
+                <span>
+                  Original evidence remains unchanged.
+                </span>
+              </div>
+            </section>
+
+            <section className="rounded-xl border border-white/[0.07] bg-[#111923] p-5">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div><h3 className="flex items-center gap-2 text-sm font-semibold text-white"><BrainCircuit size={17} className="text-cyan-400" />Local person analysis</h3><p className="mt-1 text-xs text-slate-500">OpenVINO CPU · Results are detections, not security incident claims.</p></div>
+                <div className="flex items-center gap-2"><label htmlFor="sample-interval" className="text-xs text-slate-400">Sample every</label><select id="sample-interval" value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} disabled={analyzing} className="rounded border border-white/10 bg-[#0b1119] px-2 py-2 text-xs text-white"><option value={1}>1 second</option><option value={2}>2 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select><button onClick={runAnalysis} disabled={analyzing} className="flex items-center gap-2 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-50">{analyzing ? <Loader2 size={14} className="animate-spin" /> : <BrainCircuit size={14} />}{analyzing ? "Analyzing" : "Analyze video"}</button></div>
+              </div>
+              {analysisMessage && <p role="status" className="mt-4 text-xs text-emerald-300">{analysisMessage}</p>}
+              <div className="mt-4 space-y-2">
+                {detections.length ? detections.map((detection) => <div key={detection.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/[0.06] p-3"><div className="flex items-center gap-3"><Image unoptimized width={96} height={56} src={`${API_URL}${detection.evidence_url}`} alt="Person detection evidence" className="h-14 w-24 rounded object-cover" /><div><p className="text-xs font-medium text-white">Person · {(detection.confidence * 100).toFixed(1)}% confidence</p><p className="mt-1 text-[11px] text-slate-500">{formatDuration(detection.timestamp_seconds)}</p></div></div><button onClick={() => { const player = document.querySelector("video"); if (player) { player.currentTime = detection.timestamp_seconds; player.play(); } }} className="flex items-center gap-1 text-xs text-cyan-300"><Play size={13} />Jump to video</button></div>) : <p className="py-3 text-xs text-slate-500">No detections are stored for this recording yet.</p>}
               </div>
             </section>
 
@@ -272,7 +332,23 @@ function RecordingDetailsContent() {
                 {[
                   ["Status", recording.status],
                   ["Video codec", recording.video_codec ?? "Unknown"],
-                  ["Format", recording.format_name ?? "Unknown"],
+                  ["Original format", recording.format_name ?? "Unknown"],
+                  [
+                    "Playback status",
+                    recording.playback_status === "converted"
+                      ? "Compatible copy generated"
+                      : recording.playback_status === "failed"
+                        ? "Conversion failed; original retained"
+                        : "Original is browser-compatible",
+                  ],
+                  [
+                    "Playback codec",
+                    recording.playback_codec ?? recording.video_codec ?? "Unknown",
+                  ],
+                  [
+                    "Playback format",
+                    recording.playback_format ?? recording.format_name ?? "Original",
+                  ],
                   [
                     "Frame rate",
                     recording.frame_rate
@@ -310,7 +386,10 @@ function RecordingDetailsContent() {
                       rel="noreferrer"
                       className="overflow-hidden rounded-lg border border-white/[0.08] bg-black/20"
                     >
-                      <img
+                      <Image
+                        unoptimized
+                        width={640}
+                        height={360}
                         src={`${API_URL}${frame}`}
                         alt={`Extracted frame ${index + 1}`}
                         className="aspect-video w-full object-contain"

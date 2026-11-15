@@ -1,4 +1,17 @@
-# BlackBox Home Guard
+# Frontend
+
+See the repository [README](../README.md) for current installation, API, architecture, security, and testing details. This Next.js 16 application runs on `http://localhost:3000`; set `NEXT_PUBLIC_API_URL` in `.env.local` to the local FastAPI server if it differs from `http://127.0.0.1:8000`.
+
+```bash
+npm ci
+cp .env.example .env.local
+npm run dev
+```
+
+Production checks: `npx tsc --noEmit`, `npm run lint`, and `npm run build`.
+
+<!--
+# Historical notes
 
 **Privacy-first, locally processed AI video surveillance and forensics platform.**
 
@@ -232,3 +245,4 @@ The system will progressively introduce AI-assisted detection, searchable events
 ---
 
 **BlackBox Home Guard — Your footage. Your intelligence. Your control.**
+-->

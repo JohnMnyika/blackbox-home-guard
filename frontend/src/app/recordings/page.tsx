@@ -2,13 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import {
   ArrowLeft,
   CheckCircle2,
   Upload,
   FileVideo,
   HardDrive,
-  Clock,
   Fingerprint,
   Image as ImageIcon,
   Loader2,
@@ -33,6 +33,10 @@ type Recording = {
   video_codec: string;
   frame_count: number;
   status: string;
+  playback_status?: "original" | "converted" | "failed";
+  playback_codec?: string | null;
+  playback_format?: string | null;
+  playback_size?: number | null;
   created_at: string;
 };
 
@@ -41,24 +45,7 @@ type FrameResponse = {
   total: number;
   frames: string[];
 };
-
-type UploadResponse = {
-  message: string;
-  recording_id: string;
-  filename: string;
-  file_size: number;
-  sha256: string;
-  metadata: {
-    duration: number;
-    width: number;
-    height: number;
-    video_codec: string;
-    frame_rate: number | null;
-    format_name: string;
-  };
-  frame_count: number;
-  status: string;
-};
+type UploadResult = { filename: string; frame_count: number };
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
@@ -82,6 +69,7 @@ export default function RecordingsPage() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -109,7 +97,7 @@ export default function RecordingsPage() {
   }, []);
 
   useEffect(() => {
-    loadRecordings();
+    void Promise.resolve().then(loadRecordings);
   }, [loadRecordings]);
 
   async function uploadVideo(event: React.FormEvent<HTMLFormElement>) {
@@ -120,7 +108,19 @@ export default function RecordingsPage() {
       return;
     }
 
+    const allowedExtensions = [".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"];
+    const extension = selectedFile.name.slice(selectedFile.name.lastIndexOf(".")).toLowerCase();
+    if (!allowedExtensions.includes(extension)) {
+      setError("Choose a supported video file (MP4, MOV, MKV, AVI, WEBM, M4V, MPEG, or MPG).");
+      return;
+    }
+    if (selectedFile.size > 2 * 1024 * 1024 * 1024) {
+      setError("Video exceeds the 2 GB upload limit.");
+      return;
+    }
+
     setUploading(true);
+    setUploadProgress(0);
     setError("");
     setSuccess("");
 
@@ -128,16 +128,22 @@ export default function RecordingsPage() {
       const formData = new FormData();
       formData.append("file", selectedFile);
 
-      const response = await fetch(`${API_URL}/api/v1/recordings`, {
-        method: "POST",
-        body: formData,
+      const data = await new Promise<UploadResult>((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("POST", `${API_URL}/api/v1/recordings`);
+        request.upload.onprogress = (progress) => {
+          if (progress.lengthComputable) setUploadProgress(Math.round((progress.loaded / progress.total) * 100));
+        };
+        request.onerror = () => reject(new Error("Network error while uploading the video."));
+        request.onload = () => {
+          let payload: UploadResult & { detail?: string };
+          try { payload = JSON.parse(request.responseText) as UploadResult & { detail?: string }; }
+          catch { reject(new Error("The backend returned an unreadable upload response.")); return; }
+          if (request.status < 200 || request.status >= 300) reject(new Error(payload.detail || "Video upload failed."));
+          else resolve(payload);
+        };
+        request.send(formData);
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Video upload failed.");
-      }
 
       setSuccess(
         `Successfully imported ${data.filename}. ${data.frame_count} frames extracted.`
@@ -155,6 +161,7 @@ export default function RecordingsPage() {
       setError(err instanceof Error ? err.message : "Upload failed.");
     } finally {
       setUploading(false);
+      setUploadProgress(0);
     }
   }
 
@@ -328,6 +335,7 @@ export default function RecordingsPage() {
                 )}
               </button>
             </div>
+            {uploading && <div aria-live="polite"><div className="mb-1 flex justify-between text-[11px] text-slate-400"><span>{uploadProgress === 100 ? "Upload complete · validating and processing locally" : "Uploading video"}</span><span>{uploadProgress}%</span></div><div role="progressbar" aria-label="Video upload progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={uploadProgress} className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-cyan-400 transition-[width]" style={{ width: `${uploadProgress}%` }} /></div></div>}
           </form>
 
           {error && (
@@ -402,6 +410,15 @@ export default function RecordingsPage() {
                           <span>{formatDuration(recording.duration)}</span>
                           <span>{recording.frame_count} frames</span>
                           <span>{recording.video_codec}</span>
+                          <span>
+                            Playback: {
+                              recording.playback_status === "converted"
+                                ? "H.264 copy ready"
+                                : recording.playback_status === "failed"
+                                  ? "Conversion unavailable"
+                                  : "Original"
+                            }
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -467,7 +484,10 @@ export default function RecordingsPage() {
                                 target="_blank"
                                 rel="noreferrer"
                               >
-                                <img
+                                <Image
+                                  unoptimized
+                                  width={640}
+                                  height={360}
                                   src={`${API_URL}${frame}`}
                                   alt={`Extracted frame ${index + 1}`}
                                   className="aspect-video w-full object-contain"

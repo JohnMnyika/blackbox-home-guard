@@ -6,9 +6,7 @@ import { useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
-  Bell,
   Camera,
-  ChevronDown,
   CircleHelp,
   Clock3,
   Database,
@@ -19,7 +17,6 @@ import {
   LockKeyhole,
   Menu,
   Radio,
-  Search,
   Settings,
   Shield,
   ShieldCheck,
@@ -34,11 +31,19 @@ type HealthData = {
   application: string;
   version: string;
   database: string;
+  ai_engine?: string;
+  video_engine?: string;
   timestamp: string;
   privacy?: {
     processing_mode: string;
     cloud_ai_required: boolean;
   };
+};
+type DashboardData = {
+  recordings: number; processed_recordings: number; detections: number;
+  evidence_images: number; cameras: number | null;
+  recent_recordings: { id: string; original_filename: string; created_at: string; file_size: number }[];
+  recent_detections: { id: string; recording_id: string; timestamp_seconds: number; confidence: number; original_filename: string }[];
 };
 
 const API_URL =
@@ -46,11 +51,10 @@ const API_URL =
 
 const navigation = [
   { label: "Overview", icon: LayoutDashboard, href: "/" },
-  { label: "Live Cameras", icon: Camera, soon: true },
+  { label: "Cameras", icon: Camera, href: "/cameras" },
   { label: "Recordings", icon: Video, href: "/recordings" },
-  { label: "AI Detection", icon: BrainCircuit, soon: true },
-  { label: "Incident Timeline", icon: Clock3, soon: true },
-  { label: "Evidence Vault", icon: Fingerprint, soon: true },
+  { label: "Detection Timeline", icon: Clock3, href: "/detections" },
+  { label: "Evidence Vault", icon: Fingerprint, href: "/evidence" },
 ];
 
 function StatusDot({ online }: { online: boolean }) {
@@ -61,6 +65,14 @@ function StatusDot({ online }: { online: boolean }) {
       }`}
     />
   );
+}
+
+function formatBytes(bytes: number) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value.toFixed(unit > 1 ? 1 : 0)} ${units[unit]}`;
 }
 
 function MetricCard({
@@ -97,24 +109,33 @@ export default function Home() {
   const [apiError, setApiError] = useState(false);
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [systemInfo, setSystemInfo] = useState<{ai_engine:string;video_engine:string;storage:{used_bytes:number;free_bytes:number};cameras:string} | null>(null);
 
   useEffect(() => {
     let active = true;
 
     const checkHealth = async () => {
       try {
-        const response = await fetch(`${API_URL}/api/v1/health`, {
+        const [response, summaryResponse, infoResponse] = await Promise.all([
+          fetch(`${API_URL}/api/v1/health`, {
           cache: "no-store",
-        });
+          }),
+          fetch(`${API_URL}/api/v1/dashboard`, { cache: "no-store" }),
+          fetch(`${API_URL}/api/v1/system/info`, { cache: "no-store" }),
+        ]);
 
         if (!response.ok) {
           throw new Error("API health check failed");
         }
 
         const data: HealthData = await response.json();
+        if (!summaryResponse.ok || !infoResponse.ok) throw new Error("System details unavailable");
 
         if (active) {
           setHealth(data);
+          setDashboard(await summaryResponse.json());
+          setSystemInfo(await infoResponse.json());
           setApiError(false);
           setLastChecked(new Date());
         }
@@ -136,7 +157,8 @@ export default function Home() {
     };
   }, []);
 
-  const apiOnline = health?.status === "healthy" && !apiError;
+  const apiOnline = !!health && !apiError;
+  const systemOperational = health?.status === "healthy" && !apiError;
   const databaseOnline = health?.database === "connected";
 
   return (
@@ -180,7 +202,7 @@ export default function Home() {
               {navigation.map((item) => {
                 const isActive = item.href === pathname;
 
-                if (item.soon || !item.href) {
+                if (!item.href) {
                   return (
                     <button
                       key={item.label}
@@ -219,14 +241,14 @@ export default function Home() {
             </p>
 
             <nav className="space-y-1">
-              <button className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-sm text-slate-400 hover:bg-white/[0.04]">
+              <Link href="/settings" className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-sm text-slate-400 hover:bg-white/[0.04]">
                 <Settings size={18} />
                 Settings
-              </button>
-              <button className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-sm text-slate-400 hover:bg-white/[0.04]">
+              </Link>
+              <a href={`${API_URL}/docs`} target="_blank" rel="noreferrer" className="flex w-full items-center gap-3 rounded-lg px-3 py-3 text-sm text-slate-400 hover:bg-white/[0.04]">
                 <CircleHelp size={18} />
-                Documentation
-              </button>
+                API documentation
+              </a>
             </nav>
           </div>
 
@@ -241,7 +263,7 @@ export default function Home() {
               </p>
             </div>
             <p className="mt-4 text-center text-[10px] text-slate-600">
-              BLACKBOX HOME GUARD v0.1.0
+              BLACKBOX HOME GUARD v0.2.0
             </p>
           </div>
         </aside>
@@ -265,26 +287,8 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="flex items-center gap-3">
-              <div className="hidden items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.03] px-3 py-2 text-xs text-slate-400 sm:flex">
-                <Search size={14} />
-                <span>Search workspace</span>
-                <span className="ml-4 rounded border border-white/10 px-1.5 py-0.5 text-[10px]">
-                  /
-                </span>
-              </div>
-              <button
-                className="rounded-lg border border-white/[0.07] p-2.5 text-slate-400 hover:bg-white/[0.05]"
-                aria-label="Notifications"
-              >
-                <Bell size={17} />
-              </button>
-              <div className="hidden items-center gap-2 border-l border-white/[0.07] pl-4 sm:flex">
-                <div className="flex h-8 w-8 items-center justify-center rounded-full bg-cyan-400/10 text-xs font-semibold text-cyan-300">
-                  BG
-                </div>
-                <ChevronDown size={14} className="text-slate-500" />
-              </div>
+            <div className="hidden items-center gap-2 rounded-lg border border-emerald-400/15 bg-emerald-400/[0.04] px-3 py-2 text-xs text-emerald-300 sm:flex">
+              <LockKeyhole size={14} /> Local processing
             </div>
           </header>
 
@@ -329,13 +333,15 @@ export default function Home() {
                 </div>
                 <div
                   className={`flex w-fit items-center gap-2 rounded-full border px-3 py-1.5 text-xs ${
-                    apiOnline
+                    systemOperational
                       ? "border-emerald-400/20 bg-emerald-400/[0.07] text-emerald-400"
-                      : "border-red-400/20 bg-red-400/[0.07] text-red-400"
+                      : apiOnline
+                        ? "border-amber-400/20 bg-amber-400/[0.07] text-amber-300"
+                        : "border-red-400/20 bg-red-400/[0.07] text-red-400"
                   }`}
                 >
-                  <StatusDot online={apiOnline} />
-                  {apiOnline ? "All systems operational" : "API unavailable"}
+                  <StatusDot online={systemOperational} />
+                  {systemOperational ? "All systems operational" : apiOnline ? "System degraded" : "API unavailable"}
                 </div>
               </div>
 
@@ -373,7 +379,7 @@ export default function Home() {
                   <div>
                     <p className="text-xs text-slate-500">AI inference engine</p>
                     <p className="mt-1 text-sm font-medium text-amber-400">
-                      Not configured
+                      {systemInfo?.ai_engine ?? "Checking"}
                     </p>
                   </div>
                 </div>
@@ -397,32 +403,51 @@ export default function Home() {
                 </span>
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
                 <MetricCard
                   title="Connected cameras"
-                  value="0"
-                  description="No cameras registered yet"
+                  value={dashboard ? String(dashboard.cameras ?? 0) : "—"}
+                  description="Saved configurations · not connected"
                   icon={Camera}
                 />
                 <MetricCard
-                  title="Recorded incidents"
-                  value="0"
-                  description="No incidents recorded yet"
+                  title="Person detections"
+                  value={dashboard ? String(dashboard.detections) : "—"}
+                  description="Person detections from local analysis"
                   icon={AlertTriangle}
                 />
                 <MetricCard
+                  title="Total recordings"
+                  value={dashboard ? String(dashboard.recordings) : "—"}
+                  description="Recordings in the local library"
+                  icon={Video}
+                />
+                <MetricCard
                   title="Processed recordings"
-                  value="0"
-                  description="Awaiting first video import"
+                  value={dashboard ? String(dashboard.processed_recordings) : "—"}
+                  description="Successfully processed recordings"
                   icon={Video}
                 />
                 <MetricCard
                   title="Evidence files"
-                  value="0"
-                  description="No evidence indexed yet"
+                  value={dashboard ? String(dashboard.evidence_images) : "—"}
+                  description="Unique annotated evidence images"
                   icon={Fingerprint}
                 />
               </div>
+            </section>
+
+            <section className="rounded-xl border border-white/[0.07] bg-[#111923]">
+              <div className="flex items-center justify-between border-b border-white/[0.06] p-5">
+                <div><h3 className="text-sm font-semibold text-white">Recent recordings</h3><p className="mt-1 text-xs text-slate-500">Latest uploads in local storage</p></div>
+                <Link href="/recordings" className="text-xs text-cyan-300 hover:text-cyan-200">View library →</Link>
+              </div>
+              {dashboard?.recent_recordings.length ? <div className="divide-y divide-white/[0.06]">
+                {dashboard.recent_recordings.map((recording) => <Link key={recording.id} href={`/recordings/${recording.id}`} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 hover:bg-white/[0.025]">
+                  <div className="min-w-0"><p className="truncate text-sm font-medium text-white">{recording.original_filename}</p><p className="mt-1 text-xs text-slate-500">{new Date(recording.created_at).toLocaleString()}</p></div>
+                  <span className="text-xs text-slate-400">{(recording.file_size / (1024 * 1024)).toFixed(1)} MB</span>
+                </Link>)}
+              </div> : <p className="p-5 text-xs text-slate-500">{apiOnline ? "No recordings uploaded yet." : "Recent recordings are unavailable while the API is offline."}</p>}
             </section>
 
             {/* Activity and storage */}
@@ -440,7 +465,10 @@ export default function Home() {
                   <Clock3 size={17} className="text-slate-500" />
                 </div>
 
-                <div className="flex min-h-64 flex-col items-center justify-center px-5 py-10 text-center">
+                {dashboard?.recent_detections.length ? <div className="divide-y divide-white/[0.06]">
+                  {dashboard.recent_detections.map((item) => <Link key={item.id} href={`/recordings/${item.recording_id}?t=${item.timestamp_seconds}`} className="flex items-center justify-between gap-3 px-5 py-4 hover:bg-white/[0.025]">
+                    <div><p className="text-sm text-white">Person detected · {item.original_filename}</p><p className="mt-1 text-xs text-slate-500">{item.timestamp_seconds.toFixed(1)}s · {(item.confidence * 100).toFixed(1)}% confidence</p></div><span className="text-xs text-cyan-300">Review</span>
+                  </Link>)}</div> : <div className="flex min-h-64 flex-col items-center justify-center px-5 py-10 text-center">
                   <div className="rounded-2xl border border-white/[0.06] bg-white/[0.03] p-4">
                     <FileSearch size={28} className="text-slate-500" />
                   </div>
@@ -451,7 +479,7 @@ export default function Home() {
                     Once you import surveillance footage and configure
                     detection, events will appear here.
                   </p>
-                </div>
+                </div>}
               </div>
 
               <div className="rounded-xl border border-white/[0.07] bg-[#111923]">
@@ -485,6 +513,13 @@ export default function Home() {
                     </div>
                     <span className="text-xs text-emerald-400">SQLite</span>
                   </div>
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <HardDrive size={17} className="text-cyan-400" />
+                      <span className="text-xs text-slate-300">Storage utilization</span>
+                    </div>
+                    <span className="text-right text-xs text-slate-400">{systemInfo ? `${formatBytes(systemInfo.storage.used_bytes)} used · ${formatBytes(systemInfo.storage.free_bytes)} free` : "Checking"}</span>
+                  </div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <BrainCircuit size={17} className="text-amber-400" />
@@ -492,7 +527,7 @@ export default function Home() {
                         AI processing
                       </span>
                     </div>
-                    <span className="text-xs text-amber-400">Pending</span>
+                    <span className="text-xs text-amber-400">{systemInfo?.ai_engine ?? "Checking"}</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -501,7 +536,7 @@ export default function Home() {
                         Video pipeline
                       </span>
                     </div>
-                    <span className="text-xs text-amber-400">Pending</span>
+                    <span className="text-xs text-amber-400">{systemInfo?.video_engine ?? "Checking"}</span>
                   </div>
 
                   <div className="border-t border-white/[0.06] pt-5">

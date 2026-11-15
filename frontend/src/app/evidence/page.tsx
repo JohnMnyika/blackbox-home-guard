@@ -1,0 +1,11 @@
+"use client";
+import Link from "next/link";
+import Image from "next/image";
+import { useEffect, useState } from "react";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+type Event = { id:string; recording_id:string; analysis_id:string; original_filename:string; timestamp_seconds:number; confidence:number; detection_type:string; evidence_url:string };
+export default function EvidencePage() {
+  const [items,setItems]=useState<Event[]>([]); const [error,setError]=useState("");
+  useEffect(()=>{fetch(`${API}/api/v1/detections?limit=200`,{cache:"no-store"}).then(async r=>{if(!r.ok) throw new Error("Unable to load evidence"); const d=await r.json();setItems(d.detections)}).catch(e=>setError(e.message))},[]);
+  return <main className="min-h-screen bg-[#090e15] p-5 text-slate-200 md:p-8"><div className="mx-auto max-w-6xl"><Link href="/" className="text-xs text-cyan-300">← Overview</Link><h1 className="mt-4 text-2xl font-semibold text-white">Evidence vault</h1><p className="mt-2 text-sm text-slate-400">Annotated images linked to real person detections.</p>{error&&<p role="alert" className="mt-5 text-sm text-red-300">{error}</p>}{!items.length&&!error?<p className="mt-8 rounded-xl border border-white/10 bg-[#111923] p-6 text-sm text-slate-400">No evidence images have been indexed.</p>:<div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{items.map(e=><article key={e.id} className="overflow-hidden rounded-xl border border-white/[0.08] bg-[#111923]"><a href={`${API}${e.evidence_url}`} target="_blank" rel="noreferrer"><Image unoptimized width={640} height={360} src={`${API}${e.evidence_url}`} alt={`Person detection from ${e.original_filename}`} className="aspect-video w-full object-cover"/></a><div className="p-4"><p className="truncate text-sm font-medium text-white">{e.original_filename}</p><p className="mt-1 text-xs text-slate-400">{e.timestamp_seconds.toFixed(1)}s · {(e.confidence*100).toFixed(1)}%</p><div className="mt-3 flex justify-between text-xs"><Link className="text-cyan-300" href={`/recordings/${e.recording_id}?t=${e.timestamp_seconds}`}>Review video</Link><a className="text-slate-300" href={`${API}${e.evidence_url}`} download>Download</a></div></div></article>)}</div>}</div></main>
+}
