@@ -33,6 +33,7 @@ type HealthData = {
   database: string;
   ai_engine?: string;
   video_engine?: string;
+  video_processing?: string;
   timestamp: string;
   privacy?: {
     processing_mode: string;
@@ -40,10 +41,12 @@ type HealthData = {
   };
 };
 type DashboardData = {
-  recordings: number; processed_recordings: number; detections: number;
+  recordings: number; processed_recordings: number; detections: number; persons_detected: number;
+  analysis_runs: number; active_analyses: number;
   evidence_images: number; cameras: number | null;
   recent_recordings: { id: string; original_filename: string; created_at: string; file_size: number }[];
   recent_detections: { id: string; recording_id: string; timestamp_seconds: number; confidence: number; original_filename: string }[];
+  recent_analyses: { id: string; recording_id: string; original_filename: string; status: string; progress_percent: number; analyzed_frames: number | null; total_detections: number; created_at: string; completed_at: string | null }[];
 };
 
 const API_URL =
@@ -110,7 +113,7 @@ export default function Home() {
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
-  const [systemInfo, setSystemInfo] = useState<{ai_engine:string;video_engine:string;storage:{used_bytes:number;free_bytes:number};cameras:string} | null>(null);
+  const [systemInfo, setSystemInfo] = useState<{version:string;environment:string;ai_engine:string;video_engine:string;video_processing:string;storage:{used_bytes:number;free_bytes:number};cameras:string} | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -149,7 +152,7 @@ export default function Home() {
     };
 
     checkHealth();
-    const interval = window.setInterval(checkHealth, 10000);
+    const interval = window.setInterval(checkHealth, 30000);
 
     return () => {
       active = false;
@@ -201,23 +204,6 @@ export default function Home() {
             <nav className="space-y-1">
               {navigation.map((item) => {
                 const isActive = item.href === pathname;
-
-                if (!item.href) {
-                  return (
-                    <button
-                      key={item.label}
-                      disabled
-                      className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-3 text-left text-sm text-slate-500 opacity-60"
-                    >
-                      <item.icon size={18} />
-                      <span className="flex-1">{item.label}</span>
-                      <span className="text-[9px] uppercase tracking-wider text-slate-600">
-                        Soon
-                      </span>
-                    </button>
-                  );
-                }
-
                 return (
                   <Link
                     key={item.label}
@@ -263,7 +249,7 @@ export default function Home() {
               </p>
             </div>
             <p className="mt-4 text-center text-[10px] text-slate-600">
-              BLACKBOX HOME GUARD v0.2.0
+              BLACKBOX HOME GUARD {systemInfo ? `v${systemInfo.version}` : ""}
             </p>
           </div>
         </aside>
@@ -313,7 +299,7 @@ export default function Home() {
 
               <div className="flex items-center gap-2 rounded-lg border border-white/[0.07] bg-[#111923] px-3 py-2.5 text-xs text-slate-400">
                 <Radio size={15} className="text-cyan-400" />
-                Development environment
+                {systemInfo?.environment ?? "Local environment"}
               </div>
             </section>
 
@@ -403,19 +389,20 @@ export default function Home() {
                 </span>
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
                 <MetricCard
-                  title="Connected cameras"
+                  title="Camera configurations"
                   value={dashboard ? String(dashboard.cameras ?? 0) : "—"}
                   description="Saved configurations · not connected"
                   icon={Camera}
                 />
                 <MetricCard
-                  title="Person detections"
-                  value={dashboard ? String(dashboard.detections) : "—"}
-                  description="Person detections from local analysis"
+                  title="Persons detected"
+                  value={dashboard ? String(dashboard.persons_detected) : "—"}
+                  description="Person events stored in SQLite"
                   icon={AlertTriangle}
                 />
+                <MetricCard title="Detection events" value={dashboard ? String(dashboard.detections) : "—"} description="All persisted detection records" icon={Activity} />
                 <MetricCard
                   title="Total recordings"
                   value={dashboard ? String(dashboard.recordings) : "—"}
@@ -435,6 +422,11 @@ export default function Home() {
                   icon={Fingerprint}
                 />
               </div>
+            </section>
+
+            <section className="rounded-xl border border-white/[0.07] bg-[#111923]">
+              <div className="flex items-center justify-between border-b border-white/[0.06] p-5"><div><h3 className="text-sm font-semibold text-white">Recently analyzed recordings</h3><p className="mt-1 text-xs text-slate-500">Persisted analysis jobs and their current status</p></div><span className="text-xs text-slate-500">{dashboard?.active_analyses ?? 0} active</span></div>
+              {dashboard?.recent_analyses.length ? <div className="divide-y divide-white/[0.06]">{dashboard.recent_analyses.map((analysis) => <Link key={analysis.id} href={`/recordings/${analysis.recording_id}`} className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 hover:bg-white/[0.025]"><div><p className="text-sm font-medium text-white">{analysis.original_filename}</p><p className="mt-1 text-xs text-slate-500">{analysis.status === "completed" ? `${analysis.analyzed_frames === null ? "Historical run · frame count unavailable" : `${analysis.analyzed_frames} frames`} · ${analysis.total_detections} detections` : analysis.status === "failed" ? "Analysis failed" : `${analysis.status} · ${analysis.progress_percent}%`}</p></div><span className={`text-xs ${analysis.status === "completed" ? "text-emerald-300" : analysis.status === "failed" ? "text-red-300" : "text-cyan-300"}`}>{analysis.status}</span></Link>)}</div> : <p className="p-5 text-xs text-slate-500">No analysis runs yet.</p>}
             </section>
 
             <section className="rounded-xl border border-white/[0.07] bg-[#111923]">
@@ -538,6 +530,7 @@ export default function Home() {
                     </div>
                     <span className="text-xs text-amber-400">{systemInfo?.video_engine ?? "Checking"}</span>
                   </div>
+                  <div className="flex items-center justify-between"><span className="text-xs text-slate-300">Video processing status</span><span className="text-xs text-amber-300">{systemInfo?.video_processing ?? "Checking"}</span></div>
 
                   <div className="border-t border-white/[0.06] pt-5">
                     <div className="flex items-center gap-2 text-xs font-medium text-emerald-400">
@@ -556,7 +549,7 @@ export default function Home() {
 
             <footer className="flex flex-col justify-between gap-2 border-t border-white/[0.06] pt-5 text-[10px] text-slate-600 sm:flex-row">
               <p>BLACKBOX HOME GUARD · LOCAL SECURITY INTELLIGENCE</p>
-              <p>Version 0.1.0 · Development build</p>
+              <p>{systemInfo ? `Version ${systemInfo.version} · ${systemInfo.environment}` : "Checking application version…"}</p>
             </footer>
           </div>
         </div>

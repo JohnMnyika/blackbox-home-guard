@@ -16,6 +16,8 @@ import {
   Copy,
   ShieldCheck,
   AlertCircle,
+  Search,
+  Trash2,
 } from "lucide-react";
 
 const API_URL =
@@ -37,6 +39,8 @@ type Recording = {
   playback_codec?: string | null;
   playback_format?: string | null;
   playback_size?: number | null;
+  analysis_status?: string | null;
+  last_analyzed_at?: string | null;
   created_at: string;
 };
 
@@ -76,6 +80,11 @@ export default function RecordingsPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [frames, setFrames] = useState<Record<string, string[]>>({});
   const [frameLoading, setFrameLoading] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [analysisFilter, setAnalysisFilter] = useState("all");
+  const [sortBy, setSortBy] = useState("newest");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadRecordings = useCallback(async () => {
     try {
@@ -205,6 +214,37 @@ export default function RecordingsPage() {
       setError("Could not copy the fingerprint.");
     }
   }
+
+  async function deleteRecording(recording: Recording) {
+    if (!window.confirm(`Delete “${recording.original_filename}” and all associated detection evidence? This cannot be undone.`)) return;
+    setDeletingId(recording.id);
+    setError("");
+    try {
+      const response = await fetch(`${API_URL}/api/v1/recordings/${recording.id}`, { method: "DELETE" });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "Unable to delete recording.");
+      setRecordings((items) => items.filter((item) => item.id !== recording.id));
+      setFrames((items) => { const next = { ...items }; delete next[recording.id]; return next; });
+      setSuccess(result.cleanup_pending ? "Recording removed; its local files need cleanup by an administrator." : "Recording and associated evidence deleted.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Recording deletion failed.");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  const visibleRecordings = recordings
+    .filter((item) => item.original_filename.toLowerCase().includes(search.toLowerCase()))
+    .filter((item) => statusFilter === "all" || item.status === statusFilter)
+    .filter((item) => {
+      if (analysisFilter === "all") return true;
+      if (analysisFilter === "not_analyzed") return !item.analysis_status;
+      if (analysisFilter === "active") return item.analysis_status === "queued" || item.analysis_status === "running";
+      return item.analysis_status === analysisFilter;
+    })
+    .sort((left, right) => sortBy === "largest"
+      ? right.file_size - left.file_size
+      : new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
 
   return (
     <main className="min-h-screen bg-[#090e15] text-slate-200">
@@ -372,6 +412,13 @@ export default function RecordingsPage() {
             </button>
           </div>
 
+          <div className="grid gap-3 border-b border-white/[0.06] p-4 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="relative sm:col-span-2 lg:col-span-1"><Search size={15} className="absolute left-3 top-3 text-slate-500"/><input aria-label="Search recordings by filename" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search filename" className="w-full rounded-lg border border-white/10 bg-[#0b1119] py-2.5 pl-9 pr-3 text-xs text-white outline-none focus:border-cyan-400/40"/></label>
+            <label className="sr-only" htmlFor="recording-status">Recording status</label><select id="recording-status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} className="rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-xs text-white"><option value="all">All processing statuses</option><option value="processed">Processed</option><option value="failed">Failed</option></select>
+            <label className="sr-only" htmlFor="analysis-status">Analysis status</label><select id="analysis-status" value={analysisFilter} onChange={(event) => setAnalysisFilter(event.target.value)} className="rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-xs text-white"><option value="all">All analysis statuses</option><option value="not_analyzed">Not analyzed</option><option value="queued">Queued</option><option value="running">Analyzing</option><option value="completed">Analyzed</option><option value="failed">Analysis failed</option></select>
+            <label className="sr-only" htmlFor="recording-sort">Sort recordings</label><select id="recording-sort" value={sortBy} onChange={(event) => setSortBy(event.target.value)} className="rounded-lg border border-white/10 bg-[#0b1119] px-3 py-2.5 text-xs text-white"><option value="newest">Newest first</option><option value="largest">Largest first</option></select>
+          </div>
+
           {loading ? (
             <div className="flex justify-center p-12">
               <Loader2 className="animate-spin text-cyan-400" />
@@ -386,9 +433,11 @@ export default function RecordingsPage() {
                 Upload your first CCTV recording above.
               </p>
             </div>
+          ) : visibleRecordings.length === 0 ? (
+            <p className="p-8 text-center text-sm text-slate-400">No recordings match these search and filter settings.</p>
           ) : (
             <div className="divide-y divide-white/[0.06]">
-              {recordings.map((recording) => (
+              {visibleRecordings.map((recording) => (
                 <div key={recording.id} className="p-5">
                   <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
                     <div className="flex min-w-0 items-start gap-3">
@@ -410,6 +459,7 @@ export default function RecordingsPage() {
                           <span>{formatDuration(recording.duration)}</span>
                           <span>{recording.frame_count} frames</span>
                           <span>{recording.video_codec}</span>
+                          <span>Analysis: {recording.analysis_status ?? "Not analyzed"}</span>
                           <span>
                             Playback: {
                               recording.playback_status === "converted"
@@ -440,6 +490,9 @@ export default function RecordingsPage() {
                         {expandedId === recording.id
                           ? "Hide frames"
                           : "Inspect frames"}
+                      </button>
+                      <button onClick={() => deleteRecording(recording)} disabled={deletingId === recording.id} aria-label={`Delete ${recording.original_filename}`} title="Delete recording and evidence" className="flex items-center justify-center gap-2 rounded-lg border border-red-400/20 px-3 py-2.5 text-xs text-red-300 hover:bg-red-400/10 disabled:opacity-50">
+                        {deletingId === recording.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}{deletingId === recording.id ? "Deleting" : "Delete"}
                       </button>
                     </div>
                   </div>

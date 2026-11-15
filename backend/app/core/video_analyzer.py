@@ -1,8 +1,9 @@
 import cv2
-import json
+import math
 
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Callable
 
 from app.core.person_detector import get_person_detector
 
@@ -11,6 +12,7 @@ def analyze_video(
     video_path: Path,
     evidence_directory: Path,
     interval_seconds: float = 2.0,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
     if not video_path.is_file():
         raise FileNotFoundError(f"Video not found: {video_path}")
@@ -34,6 +36,7 @@ def analyze_video(
 
     duration = frame_count / fps
     frame_interval = max(1, int(round(fps * interval_seconds)))
+    estimated_samples = max(1, math.ceil(frame_count / frame_interval))
 
     detector = get_person_detector()
 
@@ -48,7 +51,7 @@ def analyze_video(
             success, frame = capture.read()
 
             if not success:
-                break
+                raise ValueError(f"Failed to decode sampled frame at index {frame_index}.")
 
             analyzed_frames += 1
             timestamp_seconds = frame_index / fps
@@ -105,10 +108,16 @@ def analyze_video(
                 for event in events[-len(detections):]:
                     event["evidence_image_path"] = str(evidence_path)
 
+            if progress_callback and analyzed_frames % 10 == 0:
+                progress_callback(analyzed_frames, estimated_samples)
+
             frame_index += frame_interval
 
     finally:
         capture.release()
+
+    if progress_callback and analyzed_frames:
+        progress_callback(analyzed_frames, estimated_samples)
 
     return {
         "duration_seconds": round(duration, 3),

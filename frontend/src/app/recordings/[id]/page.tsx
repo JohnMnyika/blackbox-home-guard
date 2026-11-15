@@ -50,7 +50,8 @@ type FrameData = {
   frames: string[];
   total: number;
 };
-type Detection = { id: string; analysis_id: string; timestamp_seconds: number; confidence: number; detection_type: string; evidence_url: string };
+type Detection = { id: string; analysis_id: string; timestamp_seconds: number; confidence: number; detection_type: string; evidence_url: string; bbox_x:number; bbox_y:number; bbox_width:number; bbox_height:number };
+type AnalysisRun = { id:string; recording_id:string; status:"queued"|"running"|"completed"|"failed"; interval_seconds:number|null; duration_seconds:number|null; analyzed_frames:number|null; total_detections:number; processing_seconds:number|null; progress_percent:number; error_message:string|null; created_at:string; completed_at:string|null };
 
 function formatBytes(bytes: number) {
   if (!bytes) return "0 B";
@@ -85,6 +86,9 @@ function RecordingDetailsContent() {
   const [intervalSeconds, setIntervalSeconds] = useState(2);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisMessage, setAnalysisMessage] = useState("");
+  const [analysis, setAnalysis] = useState<AnalysisRun | null>(null);
+  const activeAnalysisId = analysis?.id;
+  const activeAnalysisStatus = analysis?.status;
 
   useEffect(() => {
     if (!recordingId) return;
@@ -96,13 +100,15 @@ function RecordingDetailsContent() {
         setLoading(true);
         setError("");
 
-        const [recordingResponse, framesResponse] = await Promise.all([
+        const [recordingResponse, framesResponse, detectionResponse, analysisResponse] = await Promise.all([
           fetch(`${API_URL}/api/v1/recordings/${recordingId}`, {
             cache: "no-store",
           }),
           fetch(`${API_URL}/api/v1/recordings/${recordingId}/frames`, {
             cache: "no-store",
           }),
+          fetch(`${API_URL}/api/v1/recordings/${recordingId}/detections`, { cache: "no-store" }),
+          fetch(`${API_URL}/api/v1/recordings/${recordingId}/analyses`, { cache: "no-store" }),
         ]);
 
         if (!recordingResponse.ok) {
@@ -113,13 +119,16 @@ function RecordingDetailsContent() {
         const frameData: FrameData = framesResponse.ok
           ? await framesResponse.json()
           : { frames: [], total: 0 };
-        const detectionResponse = await fetch(`${API_URL}/api/v1/recordings/${recordingId}/detections`, { cache: "no-store" });
         const detectionData = detectionResponse.ok ? await detectionResponse.json() : { detections: [] };
+        const analysisData = analysisResponse.ok ? await analysisResponse.json() : { analyses: [] };
 
         if (!cancelled) {
           setRecording(recordingData);
           setFrames(frameData.frames ?? []);
           setDetections(detectionData.detections ?? []);
+          const latest: AnalysisRun | null = analysisData.analyses?.[0] ?? null;
+          setAnalysis(latest);
+          if (latest?.status === "queued" || latest?.status === "running") setAnalyzing(true);
         }
       } catch (err) {
         if (!cancelled) {
@@ -139,23 +148,52 @@ function RecordingDetailsContent() {
     };
   }, [recordingId]);
 
+  useEffect(() => {
+    if (!activeAnalysisId || (activeAnalysisStatus !== "queued" && activeAnalysisStatus !== "running")) return;
+    let cancelled = false;
+    let requestActive = false;
+    const poll = async () => {
+      if (requestActive) return;
+      requestActive = true;
+      try {
+        const response = await fetch(`${API_URL}/api/v1/analyses/${activeAnalysisId}`, { cache: "no-store" });
+        const latest: AnalysisRun = await response.json();
+        if (!response.ok) throw new Error("Unable to refresh analysis status.");
+        if (cancelled) return;
+        setAnalysis(latest);
+        if (latest.status === "completed" || latest.status === "failed") {
+          setAnalyzing(false);
+          if (latest.status === "completed") {
+            setAnalysisMessage(`Analysis complete · ${latest.analyzed_frames ?? 0} frames · ${latest.total_detections} detections · ${latest.processing_seconds ?? 0}s`);
+            const detectionsResponse = await fetch(`${API_URL}/api/v1/recordings/${recordingId}/detections`, { cache: "no-store" });
+            if (detectionsResponse.ok) setDetections((await detectionsResponse.json()).detections ?? []);
+          } else {
+            setError(latest.error_message || "Video analysis failed.");
+          }
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Unable to refresh analysis status.");
+      } finally { requestActive = false; }
+    };
+    void poll();
+    const timer = window.setInterval(poll, 1200);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [activeAnalysisId, activeAnalysisStatus, recordingId]);
+
   async function runAnalysis() {
+    if (analyzing) return;
     setAnalyzing(true);
-    setAnalysisMessage("Analysis is running locally. Larger videos may take a while.");
+    setAnalysisMessage("Queueing local OpenVINO analysis…");
     setError("");
     try {
       const response = await fetch(`${API_URL}/api/v1/recordings/${recordingId}/analyze?interval_seconds=${intervalSeconds}`, { method: "POST" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Video analysis failed.");
-      const eventResponse = await fetch(`${API_URL}/api/v1/recordings/${recordingId}/detections?analysis_id=${data.analysis_id}`, { cache: "no-store" });
-      if (!eventResponse.ok) throw new Error("Analysis completed, but detections could not be loaded.");
-      const eventData = await eventResponse.json();
-      setDetections(eventData.detections ?? []);
-      setAnalysisMessage(`Analysis complete · ${data.analyzed_frames} frames · ${data.total_detections} detections · ${data.processing_seconds}s`);
+      setAnalysis(data);
+      setAnalysisMessage("Analysis queued. Progress updates as sampled frames are processed.");
     } catch (err) {
       setAnalysisMessage("");
       setError(err instanceof Error ? err.message : "Video analysis failed.");
-    } finally {
       setAnalyzing(false);
     }
   }
@@ -249,8 +287,9 @@ function RecordingDetailsContent() {
                 <div className="flex items-center gap-2"><label htmlFor="sample-interval" className="text-xs text-slate-400">Sample every</label><select id="sample-interval" value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} disabled={analyzing} className="rounded border border-white/10 bg-[#0b1119] px-2 py-2 text-xs text-white"><option value={1}>1 second</option><option value={2}>2 seconds</option><option value={5}>5 seconds</option><option value={10}>10 seconds</option></select><button onClick={runAnalysis} disabled={analyzing} className="flex items-center gap-2 rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-50">{analyzing ? <Loader2 size={14} className="animate-spin" /> : <BrainCircuit size={14} />}{analyzing ? "Analyzing" : "Analyze video"}</button></div>
               </div>
               {analysisMessage && <p role="status" className="mt-4 text-xs text-emerald-300">{analysisMessage}</p>}
+              {analysis && <div className="mt-4 rounded-lg border border-white/[0.06] bg-black/10 p-4"><div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium uppercase tracking-wide text-slate-300">{analysis.status}</span><span className="text-slate-400">{analysis.analyzed_frames === null ? "frame count unavailable" : `${analysis.analyzed_frames} sampled frames`} · {analysis.total_detections} detections{analysis.processing_seconds !== null ? ` · ${analysis.processing_seconds}s` : ""}</span></div>{analysis.status === "queued" || analysis.status === "running" ? <div className="mt-3"><div className="mb-1 flex justify-between text-[10px] text-slate-500"><span>Local processing progress</span><span>{analysis.progress_percent}%</span></div><div role="progressbar" aria-label="Analysis progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={analysis.progress_percent} className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full bg-cyan-400 transition-[width]" style={{width:`${analysis.progress_percent}%`}}/></div></div> : null}{analysis.status === "failed" && analysis.error_message && <p className="mt-2 text-xs text-red-300">{analysis.error_message}</p>}</div>}
               <div className="mt-4 space-y-2">
-                {detections.length ? detections.map((detection) => <div key={detection.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/[0.06] p-3"><div className="flex items-center gap-3"><Image unoptimized width={96} height={56} src={`${API_URL}${detection.evidence_url}`} alt="Person detection evidence" className="h-14 w-24 rounded object-cover" /><div><p className="text-xs font-medium text-white">Person · {(detection.confidence * 100).toFixed(1)}% confidence</p><p className="mt-1 text-[11px] text-slate-500">{formatDuration(detection.timestamp_seconds)}</p></div></div><button onClick={() => { const player = document.querySelector("video"); if (player) { player.currentTime = detection.timestamp_seconds; player.play(); } }} className="flex items-center gap-1 text-xs text-cyan-300"><Play size={13} />Jump to video</button></div>) : <p className="py-3 text-xs text-slate-500">No detections are stored for this recording yet.</p>}
+                {detections.length ? detections.map((detection) => <div key={detection.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/[0.06] p-3"><div className="flex items-center gap-3"><Image unoptimized width={96} height={56} src={`${API_URL}${detection.evidence_url}`} alt="Person detection evidence" className="h-14 w-24 rounded object-cover" /><div><p className="text-xs font-medium text-white">Person · {(detection.confidence * 100).toFixed(1)}% confidence</p><p className="mt-1 text-[11px] text-slate-500">{formatDuration(detection.timestamp_seconds)} · box {detection.bbox_x},{detection.bbox_y} {detection.bbox_width}×{detection.bbox_height}px</p><p className="mt-1 text-[10px] text-slate-600">Analysis {detection.analysis_id}</p></div></div><button onClick={() => { const player = document.querySelector("video"); if (player) { player.currentTime = detection.timestamp_seconds; player.play(); } }} className="flex items-center gap-1 text-xs text-cyan-300"><Play size={13} />Jump to video</button></div>) : <p className="py-3 text-xs text-slate-500">No detections are stored for this recording yet.</p>}
               </div>
             </section>
 

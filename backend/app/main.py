@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, Request
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -156,6 +156,25 @@ def initialize_database():
         """)
 
         connection.execute("""
+            CREATE TABLE IF NOT EXISTS analysis_runs (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed')),
+                interval_seconds REAL,
+                duration_seconds REAL,
+                analyzed_frames INTEGER,
+                total_detections INTEGER NOT NULL DEFAULT 0,
+                processing_seconds REAL,
+                progress_percent INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+            )
+        """)
+
+        connection.execute("""
             CREATE TABLE IF NOT EXISTS cameras (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -177,8 +196,30 @@ def initialize_database():
         """)
 
         connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_analysis_recording_created
+            ON analysis_runs(recording_id, created_at DESC)
+        """)
+        connection.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_analysis_per_recording
+            ON analysis_runs(recording_id)
+            WHERE status IN ('queued', 'running')
+        """)
+
+        # Preserve and expose analysis IDs already represented by detection events.
+        connection.execute("""
+            INSERT OR IGNORE INTO analysis_runs (
+                id, recording_id, status, total_detections, progress_percent,
+                created_at, completed_at
+            )
+            SELECT analysis_id, recording_id, 'completed', COUNT(*), 100,
+                   MIN(created_at), MAX(created_at)
+            FROM detection_events
+            GROUP BY analysis_id, recording_id
+        """)
+
+        connection.execute("""
             UPDATE system_metadata
-            SET value = '4'
+            SET value = '5'
             WHERE key = 'schema_version'
         """)
 
@@ -222,9 +263,13 @@ def health():
     try:
         with get_connection() as connection:
             connection.execute("SELECT 1")
+            active_analyses = connection.execute(
+                "SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')"
+            ).fetchone()[0]
         database_status = "connected"
     except sqlite3.Error:
         database_status = "disconnected"
+        active_analyses = 0
 
     model_available = (BASE_DIR / "models" / "person-detection-0202" / "FP16" / "person-detection-0202.xml").is_file()
     video_available = shutil.which("ffprobe") is not None and shutil.which("ffmpeg") is not None
@@ -236,6 +281,7 @@ def health():
         "database": database_status,
         "ai_engine": "available" if model_available else "not_configured",
         "video_engine": "available" if video_available else "offline",
+        "video_processing": "processing" if active_analyses else "idle",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "privacy": {
             "processing_mode": "local",
@@ -256,17 +302,20 @@ def system_info():
         model_status = "OpenVINO unavailable"
     try:
         subprocess.run(["ffprobe", "-version"], capture_output=True, timeout=3, check=True)
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=3, check=True)
         video_engine = "FFmpeg / FFprobe"
     except (OSError, subprocess.SubprocessError):
         video_engine = "Unavailable"
     usage = shutil.disk_usage(DATA_DIR)
     with get_connection() as connection:
         camera_count = connection.execute("SELECT COUNT(*) FROM cameras").fetchone()[0]
+        active_analyses = connection.execute("SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')").fetchone()[0]
     return {
         "application": "BlackBox Home Guard",
         "version": app.version,
         "environment": "local",
         "video_engine": video_engine,
+        "video_processing": "Processing" if active_analyses else "Idle",
         "ai_engine": ai_engine,
         "model": model_status,
         "storage_engine": "SQLite",
@@ -283,8 +332,11 @@ def dashboard_summary():
         recordings_count = connection.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
         processed_count = connection.execute("SELECT COUNT(*) FROM recordings WHERE status = 'processed'").fetchone()[0]
         detection_count = connection.execute("SELECT COUNT(*) FROM detection_events").fetchone()[0]
+        person_count = connection.execute("SELECT COUNT(*) FROM detection_events WHERE detection_type = 'person'").fetchone()[0]
         evidence_count = connection.execute("SELECT COUNT(DISTINCT evidence_image_path) FROM detection_events").fetchone()[0]
         camera_count = connection.execute("SELECT COUNT(*) FROM cameras").fetchone()[0]
+        analysis_count = connection.execute("SELECT COUNT(*) FROM analysis_runs").fetchone()[0]
+        active_analysis_count = connection.execute("SELECT COUNT(*) FROM analysis_runs WHERE status IN ('queued', 'running')").fetchone()[0]
         recent_recordings = connection.execute("SELECT id, original_filename, file_size, status, created_at FROM recordings ORDER BY created_at DESC LIMIT 5").fetchall()
         recent_detections = connection.execute("""
             SELECT d.id, d.recording_id, d.analysis_id, d.detection_type, d.timestamp_seconds,
@@ -292,10 +344,19 @@ def dashboard_summary():
             FROM detection_events d JOIN recordings r ON r.id = d.recording_id
             ORDER BY d.created_at DESC, d.timestamp_seconds DESC LIMIT 8
         """).fetchall()
+        recent_analyses = connection.execute("""
+            SELECT a.id, a.recording_id, r.original_filename, a.status, a.progress_percent,
+                   a.analyzed_frames, a.total_detections, a.created_at, a.completed_at
+            FROM analysis_runs a JOIN recordings r ON r.id = a.recording_id
+            ORDER BY a.created_at DESC LIMIT 5
+        """).fetchall()
     return {"recordings": recordings_count, "processed_recordings": processed_count,
-            "detections": detection_count, "evidence_images": evidence_count,
+            "detections": detection_count, "persons_detected": person_count,
+            "analysis_runs": analysis_count, "active_analyses": active_analysis_count,
+            "evidence_images": evidence_count,
             "cameras": camera_count, "recent_recordings": [dict(row) for row in recent_recordings],
-            "recent_detections": [dict(row) for row in recent_detections]}
+            "recent_detections": [dict(row) for row in recent_detections],
+            "recent_analyses": [dict(row) for row in recent_analyses]}
 
 
 @app.get("/api/v1/cameras")
@@ -323,23 +384,62 @@ def create_camera_configuration(configuration: CameraConfiguration):
 
 
 @app.get("/api/v1/detections")
-def list_detections(limit: int = 100, offset: int = 0):
+def list_detections(
+    limit: int = 100,
+    offset: int = 0,
+    recording_id: str | None = None,
+    detection_type: str | None = None,
+):
     if not 1 <= limit <= 500 or offset < 0:
         raise HTTPException(status_code=400, detail="Limit must be 1–500 and offset non-negative.")
+    if detection_type not in {None, "person"}:
+        raise HTTPException(status_code=400, detail="Unsupported detection type.")
+    where = []
+    values: list[object] = []
+    if recording_id:
+        where.append("d.recording_id = ?")
+        values.append(recording_id)
+    if detection_type:
+        where.append("d.detection_type = ?")
+        values.append(detection_type)
+    where_sql = " WHERE " + " AND ".join(where) if where else ""
     with get_connection() as connection:
-        total = connection.execute("SELECT COUNT(*) FROM detection_events").fetchone()[0]
+        total = connection.execute("SELECT COUNT(*) FROM detection_events d" + where_sql, values).fetchone()[0]
         rows = connection.execute("""
             SELECT d.id, d.analysis_id, d.recording_id, d.detection_type, d.timestamp_seconds,
                    d.confidence, d.created_at, r.original_filename
             FROM detection_events d JOIN recordings r ON r.id = d.recording_id
-            ORDER BY d.created_at DESC, d.timestamp_seconds DESC LIMIT ? OFFSET ?
-        """, (limit, offset)).fetchall()
+        """ + where_sql + " ORDER BY d.created_at DESC, d.timestamp_seconds DESC LIMIT ? OFFSET ?",
+            [*values, limit, offset]).fetchall()
     detections = []
     for row in rows:
         item = dict(row)
         item["evidence_url"] = f"/api/v1/recordings/{item['recording_id']}/detections/{item['id']}/evidence"
         detections.append(item)
     return {"total": total, "detections": detections}
+
+
+@app.get("/api/v1/evidence")
+def list_evidence(limit: int = 200, offset: int = 0):
+    if not 1 <= limit <= 500 or offset < 0:
+        raise HTTPException(status_code=400, detail="Limit must be 1–500 and offset non-negative.")
+    with get_connection() as connection:
+        total = connection.execute("SELECT COUNT(DISTINCT evidence_image_path) FROM detection_events").fetchone()[0]
+        rows = connection.execute("""
+            SELECT MIN(d.id) AS id, d.analysis_id, d.recording_id, r.original_filename,
+                   d.timestamp_seconds, MAX(d.confidence) AS confidence,
+                   COUNT(*) AS detections_in_frame, MAX(d.created_at) AS created_at
+            FROM detection_events d JOIN recordings r ON r.id = d.recording_id
+            GROUP BY d.evidence_image_path, d.analysis_id, d.recording_id,
+                     r.original_filename, d.timestamp_seconds
+            ORDER BY created_at DESC, d.timestamp_seconds DESC LIMIT ? OFFSET ?
+        """, (limit, offset)).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["evidence_url"] = f"/api/v1/recordings/{item['recording_id']}/detections/{item['id']}/evidence"
+        items.append(item)
+    return {"total": total, "evidence": items}
 
 
 @app.post("/api/v1/recordings")
@@ -531,21 +631,81 @@ def list_recordings():
                 id, original_filename, file_size, sha256,
                 duration, width, height, frame_rate,
                 video_codec, frame_count, status, created_at,
-                playback_status, playback_codec, playback_format, playback_size
+                playback_status, playback_codec, playback_format, playback_size,
+                (SELECT status FROM analysis_runs a WHERE a.recording_id = recordings.id
+                 ORDER BY a.created_at DESC LIMIT 1) AS analysis_status,
+                (SELECT completed_at FROM analysis_runs a WHERE a.recording_id = recordings.id
+                 AND a.status = 'completed' ORDER BY a.created_at DESC LIMIT 1) AS last_analyzed_at
             FROM recordings
             ORDER BY created_at DESC
         """).fetchall()
 
-    detections = []
-    for row in rows:
-        item = dict(row)
-        item.pop("evidence_image_path", None)
-        item["evidence_url"] = f"/api/v1/recordings/{recording_id}/detections/{item['id']}/evidence"
-        detections.append(item)
     return {
         "total": len(rows),
         "recordings": [dict(row) for row in rows],
     }
+
+
+@app.delete("/api/v1/recordings/{recording_id}")
+def delete_recording(recording_id: str):
+    """Delete only the recording's own directory and cascade its database rows."""
+    try:
+        if str(uuid.UUID(recording_id)) != recording_id:
+            raise ValueError
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+    root = RECORDINGS_DIR.resolve(strict=True)
+    folder = RECORDINGS_DIR / recording_id
+    staged_folder: Path | None = None
+
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT status FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Recording not found.")
+        active = connection.execute(
+            "SELECT 1 FROM analysis_runs WHERE recording_id = ? AND status IN ('queued', 'running') LIMIT 1",
+            (recording_id,),
+        ).fetchone()
+        if active:
+            raise HTTPException(status_code=409, detail="A recording cannot be deleted while analysis is active.")
+        previous_status = row["status"]
+        connection.execute("UPDATE recordings SET status = 'deleting' WHERE id = ?", (recording_id,))
+
+    try:
+        resolved_folder = folder.resolve(strict=False)
+        if resolved_folder.parent != root or resolved_folder != root / recording_id:
+            raise HTTPException(status_code=403, detail="Invalid recording storage directory.")
+        if resolved_folder.exists():
+            if not resolved_folder.is_dir():
+                raise HTTPException(status_code=403, detail="Recording storage entry is not a directory.")
+            staged_folder = root / f".deleting-{uuid.uuid4()}"
+            resolved_folder.rename(staged_folder)
+
+        with get_connection() as connection:
+            connection.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))
+    except HTTPException:
+        with get_connection() as connection:
+            connection.execute("UPDATE recordings SET status = ? WHERE id = ?", (previous_status, recording_id))
+        raise
+    except Exception as error:
+        logger.exception("Recording deletion failed for %s", recording_id)
+        if staged_folder and staged_folder.exists():
+            staged_folder.rename(folder)
+        with get_connection() as connection:
+            connection.execute("UPDATE recordings SET status = ? WHERE id = ?", (previous_status, recording_id))
+        raise HTTPException(status_code=500, detail="Recording deletion failed; stored data was restored.") from error
+
+    cleanup_pending = False
+    if staged_folder and staged_folder.exists():
+        try:
+            shutil.rmtree(staged_folder)
+        except OSError:
+            cleanup_pending = True
+            logger.exception("Unable to remove staged recording directory %s", staged_folder.name)
+    return {"message": "Recording deleted.", "cleanup_pending": cleanup_pending}
 
 
 @app.get("/api/v1/recordings/{recording_id}")
@@ -760,134 +920,151 @@ def get_recording_frame(recording_id: str, filename: str):
 # AI VIDEO ANALYSIS AND DETECTION API
 # ============================================================
 
-@app.post("/api/v1/recordings/{recording_id}/analyze")
-def analyze_recording(
-    recording_id: str,
-    interval_seconds: float = 2.0,
-):
-    """
-    Analyze an uploaded recording using local OpenVINO detection.
-    Each analysis receives a unique ID and evidence directory.
-    """
-
-    if not 0.25 <= interval_seconds <= 60:
-        raise HTTPException(
-            status_code=400,
-            detail="Analysis interval must be between 0.25 and 60 seconds.",
-        )
-
-    with get_connection() as connection:
-        recording = connection.execute("""
-            SELECT id, file_path, original_filename, status
-            FROM recordings
-            WHERE id = ?
-        """, (recording_id,)).fetchone()
-
-    if not recording:
-        raise HTTPException(
-            status_code=404,
-            detail="Recording not found.",
-        )
-
-    recording_directory = (RECORDINGS_DIR / recording_id).resolve()
-
+def execute_analysis_job(analysis_id: str, recording_id: str, video_path: Path, interval_seconds: float, evidence_directory: Path) -> None:
+    started_at = datetime.now(timezone.utc).isoformat()
     try:
-        video_path = Path(recording["file_path"]).resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise HTTPException(
-            status_code=404,
-            detail="Original recording file not found.",
-        )
+        with get_connection() as connection:
+            connection.execute("""
+                UPDATE analysis_runs SET status = 'running', started_at = ?
+                WHERE id = ? AND status = 'queued'
+            """, (started_at, analysis_id))
 
-    if (
-        not video_path.is_file()
-        or not video_path.is_relative_to(recording_directory)
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid recording storage path.",
-        )
+        def report_progress(completed: int, estimated: int) -> None:
+            percent = min(99, int(completed * 100 / max(estimated, 1)))
+            with get_connection() as connection:
+                connection.execute("""
+                    UPDATE analysis_runs SET analyzed_frames = ?, progress_percent = ?
+                    WHERE id = ? AND status = 'running'
+                """, (completed, percent, analysis_id))
 
-    analysis_id = str(uuid.uuid4())
-    evidence_directory = (
-        recording_directory / "detections" / analysis_id
-    )
-
-    started_at = time.perf_counter()
-
-    try:
+        timer_started = time.perf_counter()
         result = analyze_video(
             video_path=video_path,
             evidence_directory=evidence_directory,
             interval_seconds=interval_seconds,
+            progress_callback=report_progress,
         )
-
+        processing_seconds = round(time.perf_counter() - timer_started, 3)
         completed_at = datetime.now(timezone.utc).isoformat()
-        processing_seconds = round(
-            time.perf_counter() - started_at, 3
-        )
-
-        events = result["events"]
-
-        # Persist the complete analysis result in one transaction.
         with get_connection() as connection:
-            for event in events:
+            for event in result["events"]:
                 bbox = event["bbox"]
-
                 connection.execute("""
                     INSERT INTO detection_events (
-                        id,
-                        analysis_id,
-                        recording_id,
-                        detection_type,
-                        timestamp_seconds,
-                        confidence,
-                        bbox_x,
-                        bbox_y,
-                        bbox_width,
-                        bbox_height,
-                        evidence_image_path,
-                        created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        id, analysis_id, recording_id, detection_type, timestamp_seconds,
+                        confidence, bbox_x, bbox_y, bbox_width, bbox_height,
+                        evidence_image_path, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    str(uuid.uuid4()),
-                    analysis_id,
-                    recording_id,
-                    event["detection_type"],
-                    event["timestamp_seconds"],
-                    event["confidence"],
-                    bbox["x"],
-                    bbox["y"],
-                    bbox["width"],
-                    bbox["height"],
-                    event["evidence_image_path"],
-                    completed_at,
+                    str(uuid.uuid4()), analysis_id, recording_id, event["detection_type"],
+                    event["timestamp_seconds"], event["confidence"], bbox["x"], bbox["y"],
+                    bbox["width"], bbox["height"], event["evidence_image_path"], completed_at,
                 ))
+            connection.execute("""
+                UPDATE analysis_runs SET status = 'completed', interval_seconds = ?,
+                    duration_seconds = ?, analyzed_frames = ?, total_detections = ?,
+                    processing_seconds = ?, progress_percent = 100, completed_at = ?, error_message = NULL
+                WHERE id = ?
+            """, (
+                result["interval_seconds"], result["duration_seconds"],
+                result["analyzed_frames"], result["total_detections"],
+                processing_seconds, completed_at, analysis_id,
+            ))
+    except Exception:
+        logger.exception("Video analysis failed for recording %s (analysis %s)", recording_id, analysis_id)
+        with get_connection() as connection:
+            connection.execute("""
+                UPDATE analysis_runs SET status = 'failed', error_message = ?, completed_at = ?
+                WHERE id = ? AND status IN ('queued', 'running')
+            """, ("Analysis failed. Review the backend log and try again.", datetime.now(timezone.utc).isoformat(), analysis_id))
+        try:
+            if evidence_directory.resolve(strict=False).is_relative_to(RECORDINGS_DIR.resolve(strict=True)):
+                shutil.rmtree(evidence_directory, ignore_errors=True)
+        except OSError:
+            logger.exception("Could not clean failed analysis evidence for %s", analysis_id)
 
-        return {
-            "message": "Video analysis completed successfully.",
-            "analysis_id": analysis_id,
-            "recording_id": recording_id,
-            "filename": recording["original_filename"],
-            "status": "completed",
-            "interval_seconds": result["interval_seconds"],
-            "duration_seconds": result["duration_seconds"],
-            "analyzed_frames": result["analyzed_frames"],
-            "total_detections": result["total_detections"],
-            "processing_seconds": processing_seconds,
-            "completed_at": completed_at,
-        }
 
-    except HTTPException:
-        raise
+@app.post("/api/v1/recordings/{recording_id}/analyze", status_code=202)
+def analyze_recording(
+    recording_id: str,
+    background_tasks: BackgroundTasks,
+    interval_seconds: float = 2.0,
+):
+    """Queue one local OpenVINO analysis for a recording and return its status ID."""
+    if not 0.25 <= interval_seconds <= 60:
+        raise HTTPException(status_code=400, detail="Analysis interval must be between 0.25 and 60 seconds.")
 
-    except Exception as error:
-        logger.exception("Video analysis failed for recording %s", recording_id)
-        raise HTTPException(
-            status_code=500,
-            detail="Video analysis failed. Check the backend log for details.",
-        ) from error
+    with get_connection() as connection:
+        recording = connection.execute("""
+            SELECT id, file_path, status FROM recordings WHERE id = ?
+        """, (recording_id,)).fetchone()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found.")
+    if recording["status"] != "processed":
+        raise HTTPException(status_code=409, detail="This recording is not available for analysis.")
+
+    try:
+        recording_directory = (RECORDINGS_DIR / recording_id).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=404, detail="Recording storage directory not found.")
+    try:
+        video_path = Path(recording["file_path"]).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=404, detail="Original recording file not found.")
+    if not video_path.is_file() or not video_path.is_relative_to(recording_directory):
+        raise HTTPException(status_code=403, detail="Invalid recording storage path.")
+
+    analysis_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
+    evidence_directory = recording_directory / "detections" / analysis_id
+    try:
+        with get_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT status FROM recordings WHERE id = ?", (recording_id,)
+            ).fetchone()
+            if not current or current["status"] != "processed":
+                raise HTTPException(status_code=409, detail="This recording is being deleted or is unavailable.")
+            connection.execute("""
+                INSERT INTO analysis_runs (id, recording_id, status, interval_seconds, created_at)
+                VALUES (?, ?, 'queued', ?, ?)
+            """, (analysis_id, recording_id, interval_seconds, created_at))
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(status_code=409, detail="An analysis is already queued or running for this recording.") from error
+
+    background_tasks.add_task(
+        execute_analysis_job, analysis_id, recording_id, video_path,
+        interval_seconds, evidence_directory,
+    )
+    return {"analysis_id": analysis_id, "recording_id": recording_id, "status": "queued", "progress_percent": 0}
+
+
+@app.get("/api/v1/recordings/{recording_id}/analyses")
+def list_recording_analyses(recording_id: str):
+    with get_connection() as connection:
+        if not connection.execute("SELECT 1 FROM recordings WHERE id = ?", (recording_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Recording not found.")
+        rows = connection.execute("""
+            SELECT id, recording_id, status, interval_seconds, duration_seconds, analyzed_frames,
+                   total_detections, processing_seconds, progress_percent, error_message,
+                   created_at, started_at, completed_at
+            FROM analysis_runs WHERE recording_id = ? ORDER BY created_at DESC
+        """, (recording_id,)).fetchall()
+    return {"recording_id": recording_id, "total": len(rows), "analyses": [dict(row) for row in rows]}
+
+
+@app.get("/api/v1/analyses/{analysis_id}")
+def get_analysis(analysis_id: str):
+    with get_connection() as connection:
+        row = connection.execute("""
+            SELECT a.id, a.recording_id, r.original_filename, a.status, a.interval_seconds,
+                   a.duration_seconds, a.analyzed_frames, a.total_detections, a.processing_seconds,
+                   a.progress_percent, a.error_message, a.created_at, a.started_at, a.completed_at
+            FROM analysis_runs a JOIN recordings r ON r.id = a.recording_id WHERE a.id = ?
+        """, (analysis_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    return dict(row)
 
 
 @app.get("/api/v1/recordings/{recording_id}/detections")

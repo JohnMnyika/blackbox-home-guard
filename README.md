@@ -8,10 +8,24 @@ Local video recording management and person detection for Linux. Uploaded footag
 - Local video upload (up to 2 GiB), FFprobe validation, metadata extraction, preview frames and SHA-256 fingerprinting.
 - Separate H.264/AAC playback copy for media that is not browser compatible. The uploaded original remains intact. Video streaming supports HTTP byte ranges.
 - OpenVINO `person-detection-0202` FP16 CPU inference, sampled analysis, confidence scores, annotated evidence, and timestamp navigation.
-- Recording library and details, dashboard metrics, detection timeline, evidence gallery, and runtime settings.
+- Dashboard metrics for recordings, people, events, recent analyses, service health, and local storage.
+- Recording library and details with search, status filters, sort controls, upload progress, playback, metadata, and SHA-256 fingerprints.
+- Detection timeline filters and timestamp navigation; evidence gallery groups detections by frame and provides a larger viewer.
+- Recording deletion with path validation and cascade cleanup of its analyses, detections, and stored evidence.
+- Persistent queued/running/completed/failed analysis records, progress polling, and duplicate-analysis protection.
 - Local camera source configuration records with input validation; configurations are not tested and do not start live capture.
 
-Live camera/RTSP capture, user authentication, alerts, recording deletion, and remote access controls are not implemented. Do not expose the development server to untrusted networks. Local-only processing does not protect data from other users or devices that can access the host.
+Live camera/RTSP capture, user authentication, alerts, and remote access controls are not implemented. Do not expose the development server to untrusted networks. Local-only processing does not protect data from other users or devices that can access the host.
+
+## Screenshots
+
+### Dashboard
+
+![Blackbox Home Guard dashboard](dashboard.png)
+
+### Evidence gallery
+
+![Blackbox Home Guard evidence gallery](evidence.png)
 
 ## Requirements
 
@@ -53,9 +67,9 @@ Set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` if the API is served from a d
 
 ## Workflow
 
-1. Open **Recordings** and upload a supported video (`mp4`, `mov`, `mkv`, `avi`, `webm`, `m4v`, `mpeg`, or `mpg`). The API validates that the file contains a video stream, extracts metadata and preview frames, and stores an immutable original file under `backend/data/recordings/`.
+1. Open **Recordings** and upload a supported video (`mp4`, `mov`, `mkv`, `avi`, `webm`, `m4v`, `mpeg`, or `mpg`). The API validates that the file contains a video stream, extracts metadata and preview frames, and stores the uploaded original under `backend/data/recordings/`.
 2. Open the recording, review the original metadata and fingerprint, and play it through the byte-range endpoint. If needed, playback uses a separately stored browser-compatible copy.
-3. Choose a sample interval (1, 2, 5, or 10 seconds) and run local person analysis. The request is synchronous; the page reports that processing is underway and the API request remains open until it finishes. Results are persisted per analysis ID.
+3. Choose a sample interval (1, 2, 5, or 10 seconds) and queue local person analysis. The API returns an analysis ID immediately; progress and results are persisted in SQLite and shown on the recording page and dashboard.
 4. Review detections in the recording, detection timeline, or evidence vault. Evidence is retrieved through API routes; absolute storage paths are not returned to the frontend.
 
 ## API overview
@@ -70,14 +84,18 @@ Set `NEXT_PUBLIC_API_URL` in `frontend/.env.local` if the API is served from a d
 | POST | `/api/v1/recordings` | Upload a video as multipart field `file` |
 | GET | `/api/v1/recordings` | List recordings |
 | GET | `/api/v1/recordings/{id}` | Recording metadata |
+| DELETE | `/api/v1/recordings/{id}` | Remove a recording and cascade its analyses/detections/evidence |
 | GET | `/api/v1/recordings/{id}/video` | Original or compatible playback stream; supports `Range` |
 | GET | `/api/v1/recordings/{id}/frames` | List extracted frame URLs |
-| POST | `/api/v1/recordings/{id}/analyze?interval_seconds=2` | Run local sampled person analysis |
+| POST | `/api/v1/recordings/{id}/analyze?interval_seconds=2` | Queue a local sampled person analysis (202) |
+| GET | `/api/v1/recordings/{id}/analyses` | List persisted analysis runs and status |
+| GET | `/api/v1/analyses/{analysis_id}` | Poll analysis progress and retrieve results |
 | GET | `/api/v1/recordings/{id}/detections?analysis_id=...` | List detections for a recording or analysis |
 | GET | `/api/v1/detections?limit=100&offset=0` | Paginated global detection timeline |
+| GET | `/api/v1/evidence?limit=200&offset=0` | Paginated evidence gallery, grouped by annotated frame |
 | GET | `/api/v1/recordings/{id}/detections/{event_id}/evidence` | Retrieve an annotated JPEG |
 
-The database is initialized additively at `backend/data/blackbox.db`; existing rows are preserved. Recordings and evidence are stored under `backend/data/recordings/`. Back up both locations together. No cleanup or retention job is configured.
+The database is initialized additively at `backend/data/blackbox.db`; existing rows are preserved during schema upgrades. Recordings, playback copies, extracted frames, and analysis evidence are stored in per-recording folders under `backend/data/recordings/`. Back up both locations together. Deleting a recording removes its folder and cascades its analysis, detection, and evidence records. Analysis work is in-process and should run with one Uvicorn worker; queued work is not durable across process crashes. No automatic retention job is configured.
 
 ## Checks
 
@@ -103,7 +121,7 @@ The sample detector script exercises the existing model without uploading duplic
 - **Upload rejected:** verify the extension, that the media contains a decodable video stream, and that it is below 2 GiB. FFmpeg/FFprobe must be installed.
 - **Playback unsupported:** inspect the playback status in recording details. Conversion failure preserves the original but can leave it unplayable in that browser.
 - **Model unavailable:** confirm the XML and BIN files exist at the model path and that the installed OpenVINO runtime supports CPU inference.
-- **Slow analysis:** it is synchronous and samples frames sequentially. Select a wider interval for long footage. A background job/status queue is not implemented.
+- **Slow analysis:** processing runs in a background task so other API routes remain responsive, but inference still samples frames sequentially. Select a wider interval for long footage.
 - **Cameras:** configuration and live monitoring are not implemented; the camera page reports this instead of presenting a fake feed.
 
 ## Project structure
