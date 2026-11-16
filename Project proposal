@@ -1,0 +1,61 @@
+# BLACKBOX HOME GUARD
+## UGREEN Hackathon 2026 — Project Proposal
+
+**Submitter:** Individual  
+**Country:** Kenya  
+**Track:** Automate Your Workflow  
+**Development Start Date:** November 14, 2026 (11-14-26)
+
+### 1. One sentence: What does the Skill do?
+
+Blackbox Home Guard summarizes surveillance camera events for a selected time range, providing a chronological activity report and available evidence references.
+
+### 2. Who is the target user and problem?
+
+Homeowners and small-site operators using UGREEN AI NAS surveillance who need to understand recorded activity without manually reviewing lengthy event lists.
+
+### 3. What is your proposed solution?
+
+A conversational Skill that retrieves authorized camera events, organizes them by time and camera, highlights notable activity, and provides available evidence references.
+
+### 4. What is the Core User Flow?
+
+The user specifies a date, time range, and camera scope. The Skill resolves the cameras, retrieves matching events, obtains requested evidence, and generates a chronological summary. It clearly reports missing, unavailable, or incomplete results.
+
+### 5. What substantive difference does your idea offer compared with existing tools or conventional AI solutions?
+
+It transforms surveillance event records into a focused, time-bounded incident report. Its summaries remain grounded in actual NAS results rather than generating unsupported descriptions or requiring users to manually interpret event lists.
+
+### 6. Which UGREEN AI NAS capabilities will be used, and at which step in the workflow?
+
+The Skill uses the `ug-surveillance` capability through `security-monitor-agent`. The `cameras` action resolves camera scope, `event-timeline` retrieves matching activity, and `event-evidence` retrieves available evidence for returned event IDs.
+
+### 7. What was your technical approach?
+
+The Skill uses SKILL.md orchestration, required date/time and camera inputs, and the registered Surveillance expert agent. It delegates supported NAS operations, respects user permissions, and uses the NAS-local AI model for summarization where available. It does not execute direct NAS CLI commands, run custom scripts, or transmit surveillance data externally.
+
+### 8. What is the current development status?
+
+The standalone prototype implements a FastAPI and Next.js application, SQLite recording and detection records, FFmpeg video processing, and OpenVINO person detection on uploaded videos. The separate UGREEN Skill workflow has been drafted but has not yet been executed or validated on UGREEN NAS hardware.
+
+### 9. What is your final validation plan?
+
+**Test 1:** Retrieve known events from multiple cameras and verify timestamps, camera identifiers, and chronological ordering.
+
+**Test 2:** Request evidence for returned events and verify that references correspond to actual event IDs.
+
+**Edge case:** Query an unavailable camera or a period with no matching events. The Skill must report the result without inventing activity or substituting another camera.
+
+### 10. Are there any known limitations of your Project?
+
+UGREEN NAS execution remains unvalidated. Available event fields and filters depend on UGOS capabilities and NAS configuration. The Skill summarizes existing surveillance events; it does not independently analyze arbitrary uploaded videos, provide live monitoring, or guarantee person identification.
+
+---
+
+## Third-Party Components and Data-Flow Disclosure
+
+The standalone prototype uses Python (Python Software Foundation License), FastAPI (MIT), Next.js (MIT), React (MIT), TypeScript (Apache-2.0), Tailwind CSS (MIT), SQLite (public domain), FFmpeg (LGPL or GPL depending on build), and OpenVINO (Apache-2.0). It also uses the OpenVINO Open Model Zoo person-detection-0202 model, subject to its model-specific licence.
+
+ChatGPT assisted with planning and documentation. OpenVINO performs local person detection in the standalone prototype. The proposed UGREEN Skill uses the supported UGOS Surveillance expert workflow and NAS-local AI model where available. No external transfer of surveillance footage or event data is planned.
+
+The standalone application and UGREEN Skill are separate components. NAS integration remains pending validation.
